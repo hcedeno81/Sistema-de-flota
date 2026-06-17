@@ -37,16 +37,31 @@ const FORMAS_PAGO = [
   { value:"30_dom",    label:"$30 solo domingos" },
   { value:"5ls_30dom", label:"$5 L–S + $30 domingos" },
   { value:"5ls_20dom", label:"$5 L–S + $20 domingos" },
+  { value:"manual",    label:"Personalizado (elegir día y monto)" },
+];
+
+// Días de la semana para la forma de pago personalizada (0 = domingo … 6 = sábado)
+const DIAS_SEMANA = [
+  { v:"todos", l:"Todos los días" },
+  { v:"1", l:"Lunes" }, { v:"2", l:"Martes" }, { v:"3", l:"Miércoles" },
+  { v:"4", l:"Jueves" }, { v:"5", l:"Viernes" }, { v:"6", l:"Sábado" }, { v:"0", l:"Domingo" },
 ];
 
 // ── Funciones utilitarias ────────────────────────────────
-const calcMontoDia = (fp, fecha) => {
-  const d = new Date(fecha + "T12:00:00").getDay();
-  if (fp === "5_ls")      return d >= 1 && d <= 6 ? 5 : 0;
-  if (fp === "30_ls")     return d >= 1 && d <= 6 ? 30 : 0;
-  if (fp === "30_dom")    return d === 0 ? 30 : 0;
-  if (fp === "5ls_30dom") return d === 0 ? 30 : d >= 1 && d <= 6 ? 5 : 0;
-  if (fp === "5ls_20dom") return d === 0 ? 20 : d >= 1 && d <= 6 ? 5 : 0;
+const calcMontoDia = (d, fecha) => {
+  const fp = typeof d === "string" ? d : d?.formaPago;   // compatibilidad: acepta deuda u objeto-formaPago
+  const dia = new Date(fecha + "T12:00:00").getDay();
+  if (fp === "5_ls")      return dia >= 1 && dia <= 6 ? 5 : 0;
+  if (fp === "30_ls")     return dia >= 1 && dia <= 6 ? 30 : 0;
+  if (fp === "30_dom")    return dia === 0 ? 30 : 0;
+  if (fp === "5ls_30dom") return dia === 0 ? 30 : dia >= 1 && dia <= 6 ? 5 : 0;
+  if (fp === "5ls_20dom") return dia === 0 ? 20 : dia >= 1 && dia <= 6 ? 5 : 0;
+  if (fp === "manual") {
+    if (typeof d !== "object") return 0;
+    const monto = Number(d.montoManual) || 0;
+    if (d.diaManual === "todos" || d.diaManual === undefined) return monto;
+    return Number(d.diaManual) === dia ? monto : 0;
+  }
   return 0;
 };
 
@@ -59,7 +74,12 @@ const capAnual= (m) => Number(m) * 0.20;
 const round2  = (n) => Math.round(n * 100) / 100;
 // Parseo seguro de fechas: devuelve null si la fecha es inválida o vacía
 const parseF  = (f) => { if (!f) return null; const d = new Date(f + "T12:00:00"); return isNaN(d.getTime()) ? null : d; };
-const isoF    = (d) => (d && !isNaN(d.getTime())) ? d.toISOString().slice(0, 10) : "—";
+// Formatea con los componentes LOCALES (no UTC) para que parseF→isoF sea idéntico en cualquier zona horaria
+const isoF    = (d) => {
+  if (!d || isNaN(d.getTime())) return "—";
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 
 // Enter pasa al siguiente campo del formulario (input/select/textarea visible)
 const focusSiguiente = (e) => {
@@ -99,7 +119,7 @@ const comprobanteDuplicado   = (data, numero, banco, fechaComp, hora) =>
 // ── Cálculo de saldo por día (considera abonos parciales) ─
 const montoRequerido = (data, cid, f) =>
   data.deudas.filter(d => String(d.choferId)===String(cid) && d.activa && d.fechaInicio<=f && d.fechaFin>=f)
-    .reduce((s,d) => s + calcMontoDia(d.formaPago, f), 0);
+    .reduce((s,d) => s + calcMontoDia(d, f), 0);
 
 // Devuelve lo requerido, lo abonado y el saldo restante de un día concreto
 const estadoDia = (data, cid, f) => {
@@ -123,11 +143,11 @@ const diasPendientes = (data, cid, hasta) => {
   while (cur <= lim && guard++ < 4000) {
     const f = isoF(cur);
     const deudasDia = deudas.filter(d => d.fechaInicio<=f && d.fechaFin>=f);
-    const req = deudasDia.reduce((s,d) => s + calcMontoDia(d.formaPago, f), 0);
+    const req = deudasDia.reduce((s,d) => s + calcMontoDia(d, f), 0);
     if (req > 0) {
       const ed = estadoDia(data, cid, f);
       if (!ed.condonado && ed.restante > 0) {
-        const tipos = [...new Set(deudasDia.filter(d => calcMontoDia(d.formaPago, f) > 0).map(d => d.tipo))];
+        const tipos = [...new Set(deudasDia.filter(d => calcMontoDia(d, f) > 0).map(d => d.tipo))];
         res.push({ fecha:f, monto: ed.restante, montoTotal: req, abonado: ed.pagado, tipos });
       }
     }
@@ -160,12 +180,16 @@ const Btn = ({ children, v = "default", ...p }) => {
   return <button {...p} style={{ ...s[v], borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:13, fontWeight:500, ...(p.style||{}) }}>{children}</button>;
 };
 
-const Inp = ({ label, req, onKeyDown, ...p }) => (
-  <div style={{ marginBottom:10 }}>
-    {label && <label style={{ fontSize:13, color:T2, display:"block", marginBottom:3 }}>{label}{req && <span style={{ color:"#c0392b" }}> *</span>}</label>}
-    <input {...p} onKeyDown={onKeyDown || focusSiguiente} style={{ width:"100%", boxSizing:"border-box", background:W, color:T, border:`1px solid ${BR}`, borderRadius:8, padding:"6px 10px", ...(p.style||{}) }} />
-  </div>
-);
+const Inp = ({ label, req, onKeyDown, inputMode, ...p }) => {
+  // En móviles, abre el teclado numérico para montos (number) y teléfonos (tel)
+  const im = inputMode || (p.type === "number" ? "decimal" : p.type === "tel" ? "numeric" : undefined);
+  return (
+    <div style={{ marginBottom:10 }}>
+      {label && <label style={{ fontSize:13, color:T2, display:"block", marginBottom:3 }}>{label}{req && <span style={{ color:"#c0392b" }}> *</span>}</label>}
+      <input {...p} inputMode={im} onKeyDown={onKeyDown || focusSiguiente} style={{ width:"100%", boxSizing:"border-box", background:W, color:T, border:`1px solid ${BR}`, borderRadius:8, padding:"6px 10px", ...(p.style||{}) }} />
+    </div>
+  );
+};
 
 const Sel = ({ label, opts, req, onKeyDown, ...p }) => (
   <div style={{ marginBottom:10 }}>
@@ -548,6 +572,11 @@ function Deudas({ data, setData }) {
 
   const guardar = () => {
     if (vacio(form, ["choferId","vehiculoId","tipo","formaPago","fechaInicio","fechaFin","descripcion"]).length) { setErr("Todos los campos son requeridos."); return; }
+    if (form.formaPago === "manual" && (!form.montoManual || Number(form.montoManual) <= 0)) {
+      setErr("Para la forma personalizada, ingresa un monto por día mayor a 0.");
+      return;
+    }
+    if (form.fechaFin < form.fechaInicio) { setErr("La fecha fin no puede ser anterior a la fecha inicio."); return; }
     if (form.tipo === "Cuota") {
       const conflicto = data.deudas.find(d => String(d.vehiculoId) === String(form.vehiculoId) && d.tipo === "Cuota" && d.activa && d.id !== editId);
       if (conflicto) {
@@ -557,6 +586,10 @@ function Deudas({ data, setData }) {
       }
     }
     const rec = { ...form, activa: form.activa !== false, id: editId || Date.now() };
+    if (rec.formaPago === "manual") {
+      rec.diaManual = rec.diaManual || "todos";
+      rec.montoManual = Number(rec.montoManual);
+    }
     if (editId) setData(d => ({ ...d, deudas: d.deudas.map(x => x.id === editId ? rec : x) }));
     else        setData(d => ({ ...d, deudas: [...d.deudas, rec] }));
     setModal(false);
@@ -586,7 +619,7 @@ function Deudas({ data, setData }) {
           <span style={{ fontSize:13, color:T2 }}> · {placaVeh(d.vehiculoId)}</span>
           <span style={{ marginLeft:8 }}><Tag color={d.tipo==="Cuota"?"blue":d.tipo==="Préstamo"?"amber":"red"}>{d.tipo}</Tag></span>
           {!d.activa && <span style={{ marginLeft:6 }}><Tag color={d.condonada?"purple":"gray"}>{d.condonada?"Condonada":"Inactiva"}</Tag></span>}
-          <div style={{ fontSize:13, color:T2, marginTop:4 }}>{labelFP(d.formaPago)} · {d.fechaInicio} → {d.fechaFin}</div>
+          <div style={{ fontSize:13, color:T2, marginTop:4 }}>{d.formaPago==="manual" ? `Personalizado: $${Number(d.montoManual||0).toFixed(2)} ${d.diaManual && d.diaManual!=="todos" ? "cada "+(DIAS_SEMANA.find(x=>x.v===String(d.diaManual))?.l.toLowerCase()) : "todos los días"}` : labelFP(d.formaPago)} · {d.fechaInicio} → {d.fechaFin}</div>
           <div style={{ fontSize:13, color:T, marginTop:2 }}>{d.descripcion}</div>
           {d.notaCondonacion && <div style={{ fontSize:12, color:"#6d28d9", marginTop:2 }}>Nota: {d.notaCondonacion}</div>}
         </div>
@@ -637,6 +670,13 @@ function Deudas({ data, setData }) {
           <Sel label="Vehículo" req value={form.vehiculoId||""} onChange={e => setForm(f => ({...f, vehiculoId:e.target.value}))} opts={[{v:"",l:"Seleccionar vehículo..."}, ...data.vehiculos.map(v => ({v:v.id, l:`${v.placa} — ${v.marca} ${v.modelo}`}))]} />
           <Sel label="Tipo" req value={form.tipo||""} onChange={e => setForm(f => ({...f, tipo:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, "Cuota", "Préstamo", "Multa"]} />
           <Sel label="Forma de pago" req value={form.formaPago||""} onChange={e => setForm(f => ({...f, formaPago:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, ...FORMAS_PAGO.map(fp => ({v:fp.value, l:fp.label}))]} />
+          {form.formaPago === "manual" && (
+            <>
+              <Sel label="Día que aplica" req value={form.diaManual||"todos"} onChange={e => setForm(f => ({...f, diaManual:e.target.value}))} opts={DIAS_SEMANA} />
+              <Inp label="Monto por día ($)" req type="number" min="0.01" step="0.01" value={form.montoManual||""} onChange={e => setForm(f => ({...f, montoManual:e.target.value}))} />
+              <Info>Se cobrará <b>${Number(form.montoManual||0).toFixed(2)}</b> {form.diaManual && form.diaManual!=="todos" ? `cada ${DIAS_SEMANA.find(x=>x.v===form.diaManual)?.l.toLowerCase()}` : "todos los días"} dentro del rango de fechas.</Info>
+            </>
+          )}
           <Inp label="Fecha inicio" req type="date" value={form.fechaInicio||""} onChange={e => setForm(f => ({...f, fechaInicio:e.target.value}))} />
           <Inp label="Fecha fin" req type="date" value={form.fechaFin||""} onChange={e => setForm(f => ({...f, fechaFin:e.target.value}))} />
           <Inp label="Descripción" req value={form.descripcion||""} onChange={e => setForm(f => ({...f, descripcion:e.target.value}))} />
@@ -659,28 +699,46 @@ function Alertas({ data }) {
   const alertas = [];
   data.vehiculos.forEach(v => {
     [["matriculaVigencia","Matrícula"],["seguroVigencia","Seguro"],["gpsVigencia","GPS"]].forEach(([k,l]) => {
-      const d = diasVig(v[k]); if (d <= 30) alertas.push({ tipo:"Vehículo", id:v.placa, label:l, vigencia:v[k], dias:d });
+      const d = diasVig(v[k]); if (d <= 30) alertas.push({ tipo:"Vehículo", categoria:l, id:v.placa, label:l, vigencia:v[k], dias:d });
     });
   });
   data.choferes.forEach(c => {
-    [["cedulaVig","Cédula"],["licenciaVig","Licencia"],["antecedentesVig","Antecedentes penales"]].forEach(([k,l]) => {
-      const d = diasVig(c[k]); if (d <= 30) alertas.push({ tipo:"Chofer", id:c.nombres, label:l, vigencia:c[k], dias:d });
+    [["cedulaVig","Cédula"],["licenciaVig","Licencia"],["antecedentesVig","Antecedentes"]].forEach(([k,l]) => {
+      const d = diasVig(c[k]); if (d <= 30) alertas.push({ tipo:"Chofer", categoria:l, id:c.nombres, label:l, vigencia:c[k], dias:d });
     });
   });
+
+  // Orden de categorías y conteo
+  const ordenCat = ["Matrícula","Seguro","GPS","Cédula","Licencia","Antecedentes"];
+  const categorias = [...new Set(alertas.map(a => a.categoria))]
+    .sort((a,b) => ordenCat.indexOf(a) - ordenCat.indexOf(b));
+
   return (
     <div>
       <h3 style={{ margin:"0 0 12px", fontSize:16, fontWeight:500, color:T }}>Panel de alertas de vencimiento</h3>
       {alertas.length === 0
         ? <Vacío texto="Sin alertas próximas. Todo está al día." />
-        : alertas.map((a,i) => (
-          <div key={i} style={{ display:"flex", alignItems:"center", gap:12, background:a.dias<=0?"#fde8e8":"#fef3cd", border:`1px solid ${a.dias<=0?"#f5c6cb":"#ffc107"}`, borderRadius:12, padding:"0.75rem 1rem", marginBottom:8 }}>
-            <div style={{ flex:1 }}>
-              <b style={{ color:a.dias<=0?"#c0392b":"#856404" }}>{a.tipo}: {a.id}</b>
-              <div style={{ fontSize:13, color:T }}>{a.label} vence: {a.vigencia}</div>
-            </div>
-            <Tag color={a.dias<=0?"red":"amber"}>{a.dias<=0?"VENCIDO":`En ${a.dias} días`}</Tag>
-          </div>
-        ))
+        : categorias.map(cat => {
+            const grupo = alertas.filter(a => a.categoria === cat).sort((a,b) => a.dias - b.dias);
+            const vencidos = grupo.filter(a => a.dias <= 0).length;
+            return (
+              <div key={cat} style={{ marginBottom:18 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                  <span style={{ fontSize:11, fontWeight:600, color:T2, textTransform:"uppercase", letterSpacing:"0.06em" }}>{cat}</span>
+                  <span style={{ fontSize:12, color:T2 }}>· {grupo.length} alerta{grupo.length===1?"":"s"}{vencidos>0 && <span style={{ color:"#c0392b" }}> · {vencidos} vencida{vencidos===1?"":"s"}</span>}</span>
+                </div>
+                {grupo.map((a,i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:12, background:a.dias<=0?"#fde8e8":"#fef3cd", border:`1px solid ${a.dias<=0?"#f5c6cb":"#ffc107"}`, borderRadius:12, padding:"0.75rem 1rem", marginBottom:8 }}>
+                    <div style={{ flex:1 }}>
+                      <b style={{ color:a.dias<=0?"#c0392b":"#856404" }}>{a.tipo}: {a.id}</b>
+                      <div style={{ fontSize:13, color:T }}>{a.label} vence: {a.vigencia}</div>
+                    </div>
+                    <Tag color={a.dias<=0?"red":"amber"}>{a.dias<=0?"VENCIDO":`En ${a.dias} días`}</Tag>
+                  </div>
+                ))}
+              </div>
+            );
+          })
       }
     </div>
   );
@@ -983,7 +1041,10 @@ function Reportes({ data, setData }) {
   }));
 
   const mDeudas = () => data.deudas.map(d => ({
-    Chofer:nombreChofer(d.choferId), "Vehículo":placaVeh(d.vehiculoId), Tipo:d.tipo, "Forma de pago":labelFP(d.formaPago),
+    Chofer:nombreChofer(d.choferId), "Vehículo":placaVeh(d.vehiculoId), Tipo:d.tipo,
+    "Forma de pago": d.formaPago==="manual"
+      ? `Personalizado $${Number(d.montoManual||0).toFixed(2)} (${d.diaManual && d.diaManual!=="todos" ? DIAS_SEMANA.find(x=>x.v===String(d.diaManual))?.l : "todos los días"})`
+      : labelFP(d.formaPago),
     "Fecha inicio":d.fechaInicio, "Fecha fin":d.fechaFin, "Descripción":d.descripcion,
     Estado:d.activa?"Activa":(d.condonada?"Condonada":"Inactiva"), "Nota condonación":d.notaCondonacion||"",
   }));
@@ -1244,6 +1305,9 @@ function PanelAdmin({ data, setData }) {
   return (
     <div>
       <h2 style={{ margin:"0 0 16px", fontSize:18, fontWeight:500, color:T }}>Panel de administrador</h2>
+      {data.usuarios.some(u => u.email === "admin@flota.com" && u.password === "admin123" && u.activo) && (
+        <Warn>Riesgo de seguridad: el usuario <b>admin@flota.com</b> sigue usando la contraseña de fábrica <b>admin123</b>. Cualquiera que la conozca puede entrar. Cámbiala o elimina ese usuario desde la pestaña <b>Usuarios</b>.</Warn>
+      )}
       <div style={{ marginBottom:16 }}>
         <div style={{ fontSize:11, fontWeight:600, color:T2, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Visualización</div>
         <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>{panelVis.map(t => <TabBtn key={t.id} {...t} />)}</div>
@@ -1303,9 +1367,13 @@ function Digitador({ data, setData }) {
   const pendHoy   = selC ? pendientes(selC.id, fecha) : [];
   const hayAtras  = pendHoy.some(p => !selDias[p.fecha]);
   const futuros   = selC ? (() => {
-    const lim = parseF(fecha); if (!lim) return [];
-    lim.setDate(lim.getDate() + 180);
-    return diasPendientes(data, selC.id, isoF(lim)).filter(p => p.fecha > fecha).slice(0, 90);
+    // Hasta el fin real de las deudas activas del chofer (antes estaba limitado a 180 días y 90 filas,
+    // lo que ocultaba días registrables cuando el rango de la deuda era largo).
+    const finMax = data.deudas
+      .filter(d => String(d.choferId)===String(selC.id) && d.activa)
+      .map(d => d.fechaFin).filter(Boolean).sort().pop();
+    if (!finMax || finMax <= fecha) return [];
+    return diasPendientes(data, selC.id, finMax).filter(p => p.fecha > fecha);
   })() : [];
   const combinado = [...pendHoy, ...futuros];
   const futSelez  = futuros.some(p => selDias[p.fecha]);
@@ -1582,7 +1650,6 @@ function VistaChofer({ data, choferId }) {
   const hastaFin = finMax > hoy() ? finMax : hoy();
   const pendHoy  = diasPendientes(data, choferId, hoy());
   const pend     = diasPendientes(data, choferId, hastaFin).map(p => ({ fecha:p.fecha, monto:p.monto, tipos:p.tipos, montoTotal:p.montoTotal, abonado:p.abonado }));
-  const pendTotal = round2(pend.reduce((s,p) => s + p.monto, 0));
 
   // Agrupar pagos por comprobante para ver cómo se aplicó cada uno
   const compMap = {};
@@ -1596,7 +1663,7 @@ function VistaChofer({ data, choferId }) {
 
   const exportar = () => {
     const realF = real.map(p => ({ Fecha:p.fecha, Hora:p.hora, Comprobante:p.comprobante, Banco:p.banco, "Monto ($)":Number(p.monto), Tipo:p.tipo, Estado:p.estado, Registro:p.esImputacion?"Imputación a futuro":"Pago normal" }));
-    const pendF = pend.map(p => ({ Fecha:p.fecha, "Saldo ($)":p.monto, "Cuota del día ($)":p.montoTotal, "Abonado ($)":p.abonado, Tipos:p.tipos.join(" + ") }));
+    const pendF = pend.map(p => ({ Fecha:p.fecha, "Situación": p.fecha<=hoy()?"Vencida":"Por vencer", Tipos:p.tipos.join(" + "), "Abono parcial":p.abonado>0?"Sí":"No" }));
     const compF = [];
     comprobantes.forEach(c => c.items.slice().sort((a,b)=>String(a.fecha).localeCompare(String(b.fecha))).forEach(p => compF.push({
       Comprobante:c.comprobante, Banco:c.banco, "Fecha comprobante":c.fechaComp, Hora:c.hora,
@@ -1626,7 +1693,7 @@ function VistaChofer({ data, choferId }) {
         <Btn v="primary" onClick={exportar}>Descargar mi estado (Excel)</Btn>
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:10, marginBottom:16 }}>
-        {[["Pagos realizados",real.length,"#15803d"],["Días pendientes (hoy)",pendHoy.length,"#c0392b"],["Puntualidad",kpiPct+"%",kpiPct>=80?"#15803d":"#c0392b"],["Morosidad",(100-kpiPct)+"%",(100-kpiPct)<=20?"#15803d":"#c0392b"]].map(([l,v,c]) => (
+        {[["Pagos realizados",real.length,"#15803d"],["Cuotas vencidas (a hoy)",pendHoy.length,pendHoy.length===0?"#15803d":"#c0392b"],["Cuotas pendientes (total)",pend.length,pend.length===0?"#15803d":"#856404"],["Puntualidad",kpiPct+"%",kpiPct>=80?"#15803d":"#c0392b"]].map(([l,v,c]) => (
           <div key={l} style={kpi}><div style={{ fontSize:12, color:T2 }}>{l}</div><div style={{ fontSize:26, fontWeight:500, color:c }}>{v}</div></div>
         ))}
       </div>
@@ -1689,20 +1756,27 @@ function VistaChofer({ data, choferId }) {
 
       {tab === "pendientes" && (
         <>
-          <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Diario de todos los días pendientes hasta el final de las deudas (cuotas, préstamos y multas). Total pendiente: <b>${pendTotal.toFixed(2)}</b></p>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10 }}>
+            <Tag color={pendHoy.length>0?"red":"green"}>Vencidas a hoy: {pendHoy.length}</Tag>
+            <Tag color="amber">Pendientes en total: {pend.length}</Tag>
+          </div>
+          <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Detalle de los días pendientes (cuotas, préstamos y multas). Las marcadas como <b>Vencida</b> son las que ya debían estar pagadas a la fecha de hoy.</p>
           {pend.length === 0
             ? <p style={{ color:T2, fontSize:14 }}>Sin pagos pendientes.</p>
             : <div style={{ overflowX:"auto", maxHeight:480, overflowY:"auto", background:W, border:`1px solid ${BR}`, borderRadius:8 }}>
                 <table style={TBL}>
-                  <thead><tr>{["Fecha","Saldo del día","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
-                  <tbody>{pend.map((p,i) => (
-                    <tr key={i}>
-                      <td style={TD}>{p.fecha}</td>
-                      <td style={TD}>${p.monto}</td>
-                      <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
-                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abonado ${p.abonado} de ${p.montoTotal}</span> : <span style={{ color:T2 }}>—</span>}</td>
-                    </tr>
-                  ))}</tbody>
+                  <thead><tr>{["Fecha","Situación","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
+                  <tbody>{pend.map((p,i) => {
+                    const vencida = p.fecha <= hoy();
+                    return (
+                      <tr key={i}>
+                        <td style={TD}>{p.fecha}</td>
+                        <td style={TD}><Tag color={vencida?"red":"gray"}>{vencida?"Vencida":"Por vencer"}</Tag></td>
+                        <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
+                        <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
+                      </tr>
+                    );
+                  })}</tbody>
                 </table>
               </div>
           }
