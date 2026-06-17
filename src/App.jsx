@@ -37,14 +37,7 @@ const FORMAS_PAGO = [
   { value:"30_dom",    label:"$30 solo domingos" },
   { value:"5ls_30dom", label:"$5 L–S + $30 domingos" },
   { value:"5ls_20dom", label:"$5 L–S + $20 domingos" },
-  { value:"manual",    label:"Personalizado (elegir día y monto)" },
-];
-
-// Días de la semana para la forma de pago personalizada (0 = domingo … 6 = sábado)
-const DIAS_SEMANA = [
-  { v:"todos", l:"Todos los días" },
-  { v:"1", l:"Lunes" }, { v:"2", l:"Martes" }, { v:"3", l:"Miércoles" },
-  { v:"4", l:"Jueves" }, { v:"5", l:"Viernes" }, { v:"6", l:"Sábado" }, { v:"0", l:"Domingo" },
+  { value:"manual",    label:"Personalizado (elegir fecha y monto)" },
 ];
 
 // ── Funciones utilitarias ────────────────────────────────
@@ -58,9 +51,7 @@ const calcMontoDia = (d, fecha) => {
   if (fp === "5ls_20dom") return dia === 0 ? 20 : dia >= 1 && dia <= 6 ? 5 : 0;
   if (fp === "manual") {
     if (typeof d !== "object") return 0;
-    const monto = Number(d.montoManual) || 0;
-    if (d.diaManual === "todos" || d.diaManual === undefined) return monto;
-    return Number(d.diaManual) === dia ? monto : 0;
+    return d.fechaManual === fecha ? (Number(d.montoManual) || 0) : 0;
   }
   return 0;
 };
@@ -571,11 +562,11 @@ function Deudas({ data, setData }) {
   const abrir = (d = null) => { setForm(d || {activa:true}); setEditId(d?.id || null); setErr(""); setModal(true); };
 
   const guardar = () => {
-    if (vacio(form, ["choferId","vehiculoId","tipo","formaPago","fechaInicio","fechaFin","descripcion"]).length) { setErr("Todos los campos son requeridos."); return; }
-    if (form.formaPago === "manual" && (!form.montoManual || Number(form.montoManual) <= 0)) {
-      setErr("Para la forma personalizada, ingresa un monto por día mayor a 0.");
-      return;
+    if (form.formaPago === "manual") {
+      if (!form.fechaManual) { setErr("Selecciona la fecha exacta del pago."); return; }
+      if (!form.montoManual || Number(form.montoManual) <= 0) { setErr("Ingresa un monto mayor a 0 para la fecha personalizada."); return; }
     }
+    if (vacio(form, ["choferId","vehiculoId","tipo","formaPago","fechaInicio","fechaFin","descripcion"]).length) { setErr("Todos los campos son requeridos."); return; }
     if (form.fechaFin < form.fechaInicio) { setErr("La fecha fin no puede ser anterior a la fecha inicio."); return; }
     if (form.tipo === "Cuota") {
       const conflicto = data.deudas.find(d => String(d.vehiculoId) === String(form.vehiculoId) && d.tipo === "Cuota" && d.activa && d.id !== editId);
@@ -587,8 +578,9 @@ function Deudas({ data, setData }) {
     }
     const rec = { ...form, activa: form.activa !== false, id: editId || Date.now() };
     if (rec.formaPago === "manual") {
-      rec.diaManual = rec.diaManual || "todos";
       rec.montoManual = Number(rec.montoManual);
+      rec.fechaInicio = rec.fechaManual;
+      rec.fechaFin = rec.fechaManual;
     }
     if (editId) setData(d => ({ ...d, deudas: d.deudas.map(x => x.id === editId ? rec : x) }));
     else        setData(d => ({ ...d, deudas: [...d.deudas, rec] }));
@@ -619,7 +611,7 @@ function Deudas({ data, setData }) {
           <span style={{ fontSize:13, color:T2 }}> · {placaVeh(d.vehiculoId)}</span>
           <span style={{ marginLeft:8 }}><Tag color={d.tipo==="Cuota"?"blue":d.tipo==="Préstamo"?"amber":"red"}>{d.tipo}</Tag></span>
           {!d.activa && <span style={{ marginLeft:6 }}><Tag color={d.condonada?"purple":"gray"}>{d.condonada?"Condonada":"Inactiva"}</Tag></span>}
-          <div style={{ fontSize:13, color:T2, marginTop:4 }}>{d.formaPago==="manual" ? `Personalizado: $${Number(d.montoManual||0).toFixed(2)} ${d.diaManual && d.diaManual!=="todos" ? "cada "+(DIAS_SEMANA.find(x=>x.v===String(d.diaManual))?.l.toLowerCase()) : "todos los días"}` : labelFP(d.formaPago)} · {d.fechaInicio} → {d.fechaFin}</div>
+          <div style={{ fontSize:13, color:T2, marginTop:4 }}>{d.formaPago==="manual" ? `Personalizado: $${Number(d.montoManual||0).toFixed(2)} el ${d.fechaManual||d.fechaInicio}` : `${labelFP(d.formaPago)} · ${d.fechaInicio} → ${d.fechaFin}`}</div>
           <div style={{ fontSize:13, color:T, marginTop:2 }}>{d.descripcion}</div>
           {d.notaCondonacion && <div style={{ fontSize:12, color:"#6d28d9", marginTop:2 }}>Nota: {d.notaCondonacion}</div>}
         </div>
@@ -670,15 +662,18 @@ function Deudas({ data, setData }) {
           <Sel label="Vehículo" req value={form.vehiculoId||""} onChange={e => setForm(f => ({...f, vehiculoId:e.target.value}))} opts={[{v:"",l:"Seleccionar vehículo..."}, ...data.vehiculos.map(v => ({v:v.id, l:`${v.placa} — ${v.marca} ${v.modelo}`}))]} />
           <Sel label="Tipo" req value={form.tipo||""} onChange={e => setForm(f => ({...f, tipo:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, "Cuota", "Préstamo", "Multa"]} />
           <Sel label="Forma de pago" req value={form.formaPago||""} onChange={e => setForm(f => ({...f, formaPago:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, ...FORMAS_PAGO.map(fp => ({v:fp.value, l:fp.label}))]} />
-          {form.formaPago === "manual" && (
+          {form.formaPago === "manual" ? (
             <>
-              <Sel label="Día que aplica" req value={form.diaManual||"todos"} onChange={e => setForm(f => ({...f, diaManual:e.target.value}))} opts={DIAS_SEMANA} />
-              <Inp label="Monto por día ($)" req type="number" min="0.01" step="0.01" value={form.montoManual||""} onChange={e => setForm(f => ({...f, montoManual:e.target.value}))} />
-              <Info>Se cobrará <b>${Number(form.montoManual||0).toFixed(2)}</b> {form.diaManual && form.diaManual!=="todos" ? `cada ${DIAS_SEMANA.find(x=>x.v===form.diaManual)?.l.toLowerCase()}` : "todos los días"} dentro del rango de fechas.</Info>
+              <Inp label="Fecha exacta del pago" req type="date" value={form.fechaManual||""} onChange={e => setForm(f => ({...f, fechaManual:e.target.value, fechaInicio:e.target.value, fechaFin:e.target.value}))} />
+              <Inp label="Monto a pagar ese día ($)" req type="number" min="0.01" step="0.01" value={form.montoManual||""} onChange={e => setForm(f => ({...f, montoManual:e.target.value}))} />
+              {form.fechaManual && form.montoManual && <Info>Se cobrará <b>${Number(form.montoManual).toFixed(2)}</b> únicamente el día <b>{form.fechaManual}</b>.</Info>}
+            </>
+          ) : (
+            <>
+              <Inp label="Fecha inicio" req type="date" value={form.fechaInicio||""} onChange={e => setForm(f => ({...f, fechaInicio:e.target.value}))} />
+              <Inp label="Fecha fin" req type="date" value={form.fechaFin||""} onChange={e => setForm(f => ({...f, fechaFin:e.target.value}))} />
             </>
           )}
-          <Inp label="Fecha inicio" req type="date" value={form.fechaInicio||""} onChange={e => setForm(f => ({...f, fechaInicio:e.target.value}))} />
-          <Inp label="Fecha fin" req type="date" value={form.fechaFin||""} onChange={e => setForm(f => ({...f, fechaFin:e.target.value}))} />
           <Inp label="Descripción" req value={form.descripcion||""} onChange={e => setForm(f => ({...f, descripcion:e.target.value}))} />
           <Err msg={err} />
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
@@ -1043,7 +1038,7 @@ function Reportes({ data, setData }) {
   const mDeudas = () => data.deudas.map(d => ({
     Chofer:nombreChofer(d.choferId), "Vehículo":placaVeh(d.vehiculoId), Tipo:d.tipo,
     "Forma de pago": d.formaPago==="manual"
-      ? `Personalizado $${Number(d.montoManual||0).toFixed(2)} (${d.diaManual && d.diaManual!=="todos" ? DIAS_SEMANA.find(x=>x.v===String(d.diaManual))?.l : "todos los días"})`
+      ? `Personalizado $${Number(d.montoManual||0).toFixed(2)} el ${d.fechaManual||d.fechaInicio}`
       : labelFP(d.formaPago),
     "Fecha inicio":d.fechaInicio, "Fecha fin":d.fechaFin, "Descripción":d.descripcion,
     Estado:d.activa?"Activa":(d.condonada?"Condonada":"Inactiva"), "Nota condonación":d.notaCondonacion||"",
