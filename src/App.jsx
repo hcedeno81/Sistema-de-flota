@@ -85,6 +85,14 @@ const focusSiguiente = (e) => {
   if (i > -1 && i + 1 < campos.length) campos[i + 1].focus();
 };
 
+// Formatea entrada de hora a HH:MM insertando ":" automáticamente (teclado numérico en móvil)
+const formatHora = (v) => {
+  const d = String(v).replace(/\D/g, "").slice(0, 4);
+  return d.length <= 2 ? d : d.slice(0, 2) + ":" + d.slice(2);
+};
+// Valida hora real en formato HH:MM (00:00 a 23:59)
+const horaValida = (v) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(v || "");
+
 // ── Exportación a Excel ──────────────────────────────────
 const descargarLibro = (sheets, filename) => {
   const wb = XLSX.utils.book_new();
@@ -1266,7 +1274,7 @@ function EditarPagos({ data, setData }) {
           <Inp label="Tipo" value={form.tipo||""} onChange={e => setForm(f => ({...f, tipo:e.target.value}))} />
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0 12px" }}>
             <Inp label="N° Comprobante" value={form.comprobante||""} onChange={e => setForm(f => ({...f, comprobante:e.target.value}))} />
-            <Inp label="Hora" type="time" value={form.hora||""} onChange={e => setForm(f => ({...f, hora:e.target.value}))} />
+            <Inp label="Hora (HH:MM)" inputMode="numeric" placeholder="14:30" maxLength={5} value={form.hora||""} onChange={e => setForm(f => ({...f, hora:formatHora(e.target.value)}))} />
           </div>
           <Inp label="Fecha del comprobante" type="date" value={form.fechaComp||""} onChange={e => setForm(f => ({...f, fechaComp:e.target.value}))} />
           <Sel label="Banco" value={form.banco||""} onChange={e => setForm(f => ({...f, banco:e.target.value}))} opts={bancoOpts} />
@@ -1399,6 +1407,7 @@ function Digitador({ data, setData }) {
     setErr("");
     if (!totalComp || totalComp <= 0)                                              { setErr("Ingresa el monto total del comprobante."); return; }
     if (vacio(comp, ["numero","hora","banco","cuentaDestino"]).length)             { setErr("Completa todos los campos del comprobante."); return; }
+    if (!horaValida(comp.hora))                                                    { setErr("Ingresa una hora válida en formato HH:MM (ej. 14:30)."); return; }
     if (diasSel.length === 0)                                                      { setErr("Selecciona al menos un día pendiente."); return; }
     if (diasSel.some(f => !selDias[f].monto || Number(selDias[f].monto) <= 0))     { setErr("Ingresa el monto para cada día seleccionado."); return; }
     if (saldo < 0)                                                                 { setErr(`El total asignado supera el comprobante en ${Math.abs(saldo).toFixed(2)}. Ajusta los montos.`); return; }
@@ -1535,8 +1544,8 @@ function Digitador({ data, setData }) {
             <Inp label="Monto total del comprobante ($)" req type="number" min="0.01" step="0.01"
               value={comp.totalComp} onChange={e => setComp(c => ({...c, totalComp:e.target.value}))} />
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0 12px" }}>
-              <Inp label="N° Comprobante" req value={comp.numero} onChange={e => setComp(c => ({...c, numero:e.target.value}))} />
-              <Inp label="Hora" req type="time" value={comp.hora} onChange={e => setComp(c => ({...c, hora:e.target.value}))} />
+              <Inp label="N° Comprobante" req inputMode="numeric" value={comp.numero} onChange={e => setComp(c => ({...c, numero:e.target.value}))} />
+              <Inp label="Hora (HH:MM)" req inputMode="numeric" placeholder="14:30" maxLength={5} value={comp.hora} onChange={e => setComp(c => ({...c, hora:formatHora(e.target.value)}))} />
             </div>
             <Sel label="Banco del comprobante" req value={comp.banco} onChange={e => setComp(c => ({...c, banco:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, ...data.bancos.map(b => ({v:b.nombre, l:b.nombre}))]} />
             <Sel label="Cuenta destino" req value={comp.cuentaDestino} onChange={e => setComp(c => ({...c, cuentaDestino:e.target.value}))} opts={[{v:"",l:"Seleccionar..."}, ...data.cuentas.map(c => ({v:c.numero, l:`${c.titular} · ${c.numero}`}))]} />
@@ -1615,7 +1624,7 @@ function Digitador({ data, setData }) {
 
 // ── Vista Chofer ─────────────────────────────────────────
 function VistaChofer({ data, choferId }) {
-  const [tab, setTab] = useState("realizados");
+  const [tab, setTab] = useState("vencidos");
   const chofer = data.choferes.find(c => c.id === choferId);
   if (!chofer) return <Vacío texto="Chofer no encontrado." />;
 
@@ -1645,6 +1654,9 @@ function VistaChofer({ data, choferId }) {
   const hastaFin = finMax > hoy() ? finMax : hoy();
   const pendHoy  = diasPendientes(data, choferId, hoy());
   const pend     = diasPendientes(data, choferId, hastaFin).map(p => ({ fecha:p.fecha, monto:p.monto, tipos:p.tipos, montoTotal:p.montoTotal, abonado:p.abonado }));
+  // Vencidos: días pendientes hasta hoy. Por vencer: días pendientes con fecha posterior a hoy (sin repetir).
+  const vencidos  = pendHoy;
+  const porVencer = pend.filter(p => p.fecha > hoy());
 
   // Agrupar pagos por comprobante para ver cómo se aplicó cada uno
   const compMap = {};
@@ -1673,9 +1685,10 @@ function VistaChofer({ data, choferId }) {
   };
 
   const tabs = [
-    { id:"realizados",   l:"Pagos realizados" },
-    { id:"comprobantes", l:"Aplicación de comprobantes" },
+    { id:"vencidos",     l:"Pagos vencidos" },
     { id:"pendientes",   l:"Pagos pendientes" },
+    { id:"comprobantes", l:"Por comprobantes" },
+    { id:"realizados",   l:"Pagos realizados" },
   ];
   const TabBtn = ({ id, l }) => (
     <button onClick={() => setTab(id)} style={{ padding:"6px 14px", borderRadius:8, border:`1px solid ${BR}`, cursor:"pointer", fontWeight:tab===id?500:400, background:tab===id?"#3A8A6E":BG, color:tab===id?W:T, fontSize:13 }}>{l}</button>
@@ -1749,29 +1762,48 @@ function VistaChofer({ data, choferId }) {
         </>
       )}
 
+      {tab === "vencidos" && (
+        <>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10 }}>
+            <Tag color={vencidos.length>0?"red":"green"}>Vencidos a hoy: {vencidos.length}</Tag>
+          </div>
+          <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Días que ya debían estar pagados a la fecha de hoy (cuotas, préstamos y multas).</p>
+          {vencidos.length === 0
+            ? <p style={{ color:T2, fontSize:14 }}>No tienes pagos vencidos. Estás al día.</p>
+            : <div style={{ overflowX:"auto", maxHeight:480, overflowY:"auto", background:W, border:`1px solid ${BR}`, borderRadius:8 }}>
+                <table style={TBL}>
+                  <thead><tr>{["Fecha","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
+                  <tbody>{vencidos.map((p,i) => (
+                    <tr key={i}>
+                      <td style={TD}>{p.fecha}</td>
+                      <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
+                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+          }
+        </>
+      )}
+
       {tab === "pendientes" && (
         <>
           <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10 }}>
-            <Tag color={pendHoy.length>0?"red":"green"}>Vencidas a hoy: {pendHoy.length}</Tag>
-            <Tag color="amber">Pendientes en total: {pend.length}</Tag>
+            <Tag color="amber">Pendientes por vencer: {porVencer.length}</Tag>
           </div>
-          <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Detalle de los días pendientes (cuotas, préstamos y multas). Las marcadas como <b>Vencida</b> son las que ya debían estar pagadas a la fecha de hoy.</p>
-          {pend.length === 0
-            ? <p style={{ color:T2, fontSize:14 }}>Sin pagos pendientes.</p>
+          <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Días futuros aún por vencer (cuotas, préstamos y multas).</p>
+          {porVencer.length === 0
+            ? <p style={{ color:T2, fontSize:14 }}>No hay pagos por vencer.</p>
             : <div style={{ overflowX:"auto", maxHeight:480, overflowY:"auto", background:W, border:`1px solid ${BR}`, borderRadius:8 }}>
                 <table style={TBL}>
-                  <thead><tr>{["Fecha","Situación","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
-                  <tbody>{pend.map((p,i) => {
-                    const vencida = p.fecha <= hoy();
-                    return (
-                      <tr key={i}>
-                        <td style={TD}>{p.fecha}</td>
-                        <td style={TD}><Tag color={vencida?"red":"gray"}>{vencida?"Vencida":"Por vencer"}</Tag></td>
-                        <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
-                        <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
-                      </tr>
-                    );
-                  })}</tbody>
+                  <thead><tr>{["Fecha","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
+                  <tbody>{porVencer.map((p,i) => (
+                    <tr key={i}>
+                      <td style={TD}>{p.fecha}</td>
+                      <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
+                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
+                    </tr>
+                  ))}</tbody>
                 </table>
               </div>
           }
