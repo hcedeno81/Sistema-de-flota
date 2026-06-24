@@ -20,3 +20,20 @@ export async function saveData(obj) {
     .upsert({ id: ROW_ID, contenido: obj, updated_at: new Date().toISOString() });
   if (error) throw error;
 }
+
+// Se suscribe a los cambios de la fila. Llama a onChange(contenido) cada vez
+// que OTRO usuario guarda. Devuelve una función para cancelar la suscripción.
+export function subscribeData(onChange) {
+  const channel = supabase
+    .channel("app_state_changes")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "app_state", filter: `id=eq.${ROW_ID}` },
+      (payload) => {
+        const nuevo = payload.new?.contenido;
+        if (nuevo) onChange(nuevo);
+      }
+    )
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
