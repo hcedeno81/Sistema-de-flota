@@ -13,19 +13,16 @@ const COLECCIONES = [
 async function leerRegistros() {
   const datos = {}, mapa = {};
   COLECCIONES.forEach(c => { datos[c] = []; mapa[c] = {}; });
-
   const { data, error } = await supabase
     .from(TABLA)
     .select("coleccion, registro_id, datos, activo")
     .eq("activo", true);
   if (error) throw error;
-
   (data || []).forEach(fila => {
     if (!datos[fila.coleccion]) { datos[fila.coleccion] = []; mapa[fila.coleccion] = {}; }
     datos[fila.coleccion].push(fila.datos);
     mapa[fila.coleccion][String(fila.registro_id)] = fila.datos;
   });
-
   return { datos, mapa, total: (data || []).length };
 }
 
@@ -34,10 +31,8 @@ async function migrarBlob() {
   const { data, error } = await supabase
     .from("app_state").select("contenido").eq("id", BLOB_ID).maybeSingle();
   if (error) throw error;
-
   const blob = data?.contenido;
   if (!blob || typeof blob !== "object") return false;
-
   const filas = [];
   COLECCIONES.forEach(col => {
     (blob[col] || []).forEach(r => {
@@ -45,10 +40,11 @@ async function migrarBlob() {
     });
   });
   if (!filas.length) return false;
-
   // Insertar en lotes para no exceder límites
   for (let i = 0; i < filas.length; i += 500) {
-    const { error: e2 } = await supabase.from(TABLA).upsert(filas.slice(i, i + 500));
+    const { error: e2 } = await supabase
+      .from(TABLA)
+      .upsert(filas.slice(i, i + 500), { onConflict: "coleccion,registro_id" });
     if (e2) throw e2;
   }
   return true;
@@ -65,24 +61,38 @@ export async function loadData() {
 }
 
 // Guarda (inserta o actualiza) UN solo registro. No toca ninguna otra fila.
+// onConflict apunta a la clave primaria compuesta (coleccion, registro_id).
+// .select() OBLIGA a Supabase a devolver la fila escrita: si no devuelve nada,
+// el guardado NO se confirmó y lanzamos error (no decimos "guardado" en falso).
 export async function guardarRegistro(coleccion, registro) {
-  const { error } = await supabase.from(TABLA).upsert({
-    coleccion,
-    registro_id: String(registro.id),
-    datos: registro,
-    activo: true,
-    updated_at: new Date().toISOString(),
-  });
+  const { data, error } = await supabase
+    .from(TABLA)
+    .upsert({
+      coleccion,
+      registro_id: String(registro.id),
+      datos: registro,
+      activo: true,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "coleccion,registro_id" })
+    .select();
   if (error) throw error;
+  if (!data || data.length === 0)
+    throw new Error(`Guardado no confirmado para ${coleccion}/${registro.id}`);
+  return data[0].datos;
 }
 
 // Borrado SUAVE: marca la fila como inactiva en vez de eliminarla. Nada se pierde de verdad.
+// .select() confirma que efectivamente se tocó una fila.
 export async function borrarRegistro(coleccion, id) {
-  const { error } = await supabase.from(TABLA)
+  const { data, error } = await supabase
+    .from(TABLA)
     .update({ activo: false, updated_at: new Date().toISOString() })
     .eq("coleccion", coleccion)
-    .eq("registro_id", String(id));
+    .eq("registro_id", String(id))
+    .select();
   if (error) throw error;
+  if (!data || data.length === 0)
+    throw new Error(`Borrado no confirmado para ${coleccion}/${id}`);
 }
 
 // Suscripción en tiempo real a cambios de registros individuales.
