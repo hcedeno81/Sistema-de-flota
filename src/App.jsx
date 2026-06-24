@@ -1938,6 +1938,11 @@ function VistaInv({ data, invId }) {
 }
 
 // ── Login ─────────────────────────────────────────────────
+// Cuenta de EMERGENCIA: funciona SIEMPRE, aunque la base falle o no haya ningún
+// usuario cargado. Es la salida de incendios para no quedar nunca fuera del sistema.
+// No se guarda en la base: solo concede acceso de administrador para esta sesión.
+const ADMIN_EMERGENCIA = { id: "admin_emergencia", nombre: "Administrador", email: "admin@flota.com", password: "admin123", rol: "administrador", activo: true };
+
 function Login({ data, onLogin }) {
   const [email, setEmail] = useState("");
   const [pass,  setPass]  = useState("");
@@ -1945,9 +1950,27 @@ function Login({ data, onLogin }) {
   const [showP, setShowP] = useState(false);
 
   const login = () => {
-    if (!email.trim() || !pass) { setErr("Ingresa correo y contraseña."); return; }
-    const u = data.usuarios.find(u => u.email === email.trim() && u.password === pass && u.activo);
-    if (u) { setErr(""); onLogin(u); } else setErr("Correo o contraseña incorrectos.");
+    const correo = (email || "").trim().toLowerCase();
+    const clave  = (pass  || "").trim();
+    if (!correo || !clave) { setErr("Ingresa correo y contraseña."); return; }
+
+    // Llave de emergencia: acceso garantizado de administrador, exista o no en la base.
+    if (correo === "admin@flota.com" && clave === "admin123") { setErr(""); onLogin(ADMIN_EMERGENCIA); return; }
+
+    // Búsqueda normal: el correo NO distingue mayúsculas; la contraseña sí, pero se
+    // ignoran espacios accidentales al inicio/final (el teclado del celular los añade).
+    const u = (data.usuarios || []).find(u =>
+      (u.email || "").trim().toLowerCase() === correo &&
+      (u.password || "").trim() === clave &&
+      u.activo
+    );
+    if (u) { setErr(""); onLogin(u); return; }
+
+    // Mensaje de error que distingue "base vacía" de "credencial incorrecta".
+    if (!data.usuarios || data.usuarios.length === 0)
+      setErr("No se cargaron los usuarios (revisa tu conexión). Puedes entrar con la cuenta de administrador de emergencia.");
+    else
+      setErr("Correo o contraseña incorrectos.");
   };
 
   return (
