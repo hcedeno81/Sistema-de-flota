@@ -1022,9 +1022,10 @@ function Usuarios({ data, setData }) {
 }
 
 // ── Reportes Excel + Copias de seguridad ─────────────────
-function Reportes({ data, setData }) {
+function Reportes({ data, setData, onRestaurar }) {
   const [msg, setMsg] = useState("");
   const [confRest, setConfRest] = useState(null); // respaldo pendiente de confirmar
+  const [restaurando, setRestaurando] = useState(null); // { hechos, total, fallidos } durante la restauración
   const fileRef = useRef(null);
 
   const nombreChofer = id => data.choferes.find(c => c.id === Number(id))?.nombres || "—";
@@ -1131,15 +1132,29 @@ function Reportes({ data, setData }) {
     e.target.value = "";
   };
 
-  const confirmarRestaurar = () => {
-    if (!confRest) return;
+  const confirmarRestaurar = async () => {
+    if (!confRest || !onRestaurar) return;
     const obj = { ...confRest.obj };
     // Garantizar que existan todas las colecciones esperadas
     Object.keys(INIT).forEach(k => { if (!obj[k]) obj[k] = INIT[k]; });
     if (!obj.usuarios || obj.usuarios.length === 0) obj.usuarios = INIT.usuarios;
-    setData(obj);
     setConfRest(null);
-    setMsg("Copia restaurada correctamente.");
+    setMsg("");
+    setRestaurando({ hechos: 0, total: 0, fallidos: 0 });
+    try {
+      const { total, fallidos } = await onRestaurar(obj, (hechos, tot, fall) =>
+        setRestaurando({ hechos, total: tot, fallidos: fall })
+      );
+      if (fallidos.length === 0) {
+        setMsg(`Copia restaurada y grabada correctamente: ${total} registro${total === 1 ? "" : "s"} confirmado${total === 1 ? "" : "s"} en la base.`);
+      } else {
+        setMsg(`Restauración terminada con ${fallidos.length} registro(s) que no se pudieron grabar de ${total}. Revisa la conexión y vuelve a restaurar el mismo archivo (los ya grabados no se duplican).`);
+      }
+    } catch (e) {
+      setMsg("Error durante la restauración: " + e.message + ". Puedes volver a restaurar el mismo archivo sin duplicar lo ya grabado.");
+    } finally {
+      setRestaurando(null);
+    }
   };
 
   const items = [
@@ -1188,14 +1203,29 @@ function Reportes({ data, setData }) {
 
       {confRest && (
         <Modal title="Restaurar copia de seguridad">
-          <Warn>Esto reemplazará <b>TODOS</b> los datos actuales por los del archivo <b>{confRest.nombre}</b>. Esta acción no se puede deshacer.</Warn>
+          <Info>Se añadirán y actualizarán en la base los datos del archivo <b>{confRest.nombre}</b>. Los registros que ya existen y no estén en el archivo <b>se conservan</b> (no se borra nada).</Info>
           <div style={{ fontSize:13, color:T2, marginBottom:10 }}>
             El respaldo contiene: {confRest.obj.vehiculos?.length||0} vehículos · {confRest.obj.choferes?.length||0} choferes · {confRest.obj.inversionistas?.length||0} inversionistas · {confRest.obj.pagos?.length||0} pagos.
           </div>
+          <Warn>La grabación puede tardar según la cantidad de registros. <b>No cierres ni recargues</b> la página hasta que termine.</Warn>
           <Acciones>
             <Btn onClick={() => setConfRest(null)}>Cancelar</Btn>
-            <Btn v="primary" onClick={confirmarRestaurar}>Restaurar definitivamente</Btn>
+            <Btn v="primary" onClick={confirmarRestaurar}>Restaurar y grabar</Btn>
           </Acciones>
+        </Modal>
+      )}
+
+      {restaurando && (
+        <Modal title="Restaurando copia de seguridad">
+          <Info>Grabando los registros en la base, uno por uno, y esperando confirmación de cada uno. <b>No cierres ni recargues</b> la página.</Info>
+          <div style={{ fontSize:14, color:T, fontWeight:500, marginBottom:8 }}>
+            {restaurando.total > 0
+              ? `Grabados ${restaurando.hechos} de ${restaurando.total}${restaurando.fallidos > 0 ? ` · ${restaurando.fallidos} con error` : ""}`
+              : "Preparando…"}
+          </div>
+          <div style={{ height:10, background:BG, border:`1px solid ${BR}`, borderRadius:6, overflow:"hidden" }}>
+            <div style={{ height:"100%", width: restaurando.total > 0 ? `${Math.round((restaurando.hechos / restaurando.total) * 100)}%` : "0%", background:"#4A6FA5", transition:"width 0.2s" }} />
+          </div>
         </Modal>
       )}
     </div>
@@ -1304,7 +1334,7 @@ function EditarPagos({ data, setData }) {
 }
 
 // ── Panel administrador ───────────────────────────────────
-function PanelAdmin({ data, setData }) {
+function PanelAdmin({ data, setData, onRestaurar }) {
   const [tab, setTab] = useState("alertas");
 
   const panelVis = [{ id:"alertas",l:"Alertas" },{ id:"choferes",l:"Choferes" },{ id:"inversionistas",l:"Inversionistas" },{ id:"inversiones",l:"Inversiones" }];
@@ -1343,7 +1373,7 @@ function PanelAdmin({ data, setData }) {
       {tab === "deudas"         && <Deudas         data={data} setData={setData} />}
       {tab === "usuarios"       && <Usuarios       data={data} setData={setData} />}
       {tab === "editarPagos"    && <EditarPagos    data={data} setData={setData} />}
-      {tab === "reportes"       && <Reportes       data={data} setData={setData} />}
+      {tab === "reportes"       && <Reportes       data={data} setData={setData} onRestaurar={onRestaurar} />}
     </div>
   );
 }
@@ -2006,6 +2036,35 @@ export default function App() {
     setData(completo);
   };
 
+  // Restauración desde respaldo JSON: escribe CADA registro DIRECTAMENTE en la base y espera
+  // su confirmación (guardarRegistro usa .select()). NO se apoya en el guardado automático,
+  // así que no hay "éxito" falso ni carrera con el tiempo real. Es un MERGE seguro: añade y
+  // actualiza lo que trae el respaldo, y NO borra los registros que ya existen y no están en él.
+  // onProgress(hechos, total, fallidos) permite mostrar una barra de avance.
+  const restaurarRespaldo = async (obj, onProgress) => {
+    puedeGuardar.current = false; // pausa el guardado automático mientras dura la restauración
+    try {
+      // Reúne todos los registros válidos del respaldo
+      const todos = [];
+      Object.keys(INIT).forEach(col => {
+        (obj[col] || []).forEach(r => { if (r && r.id != null) todos.push({ col, r }); });
+      });
+      const fallidos = [];
+      let hechos = 0;
+      for (const { col, r } of todos) {
+        try { await guardarRegistro(col, r); }      // espera confirmación real de Supabase
+        catch (e) { fallidos.push({ col, id: r.id, msg: e.message }); }
+        hechos++;
+        if (onProgress) onProgress(hechos, todos.length, fallidos.length);
+      }
+      // Recarga desde la base para dejar pantalla y espejo idénticos a lo que quedó grabado
+      await resincronizar();
+      return { total: todos.length, fallidos };
+    } finally {
+      puedeGuardar.current = true;  // reanuda el guardado automático pase lo que pase
+    }
+  };
+
   // Guardado por REGISTRO: compara el estado actual con el espejo y escribe SOLO lo que cambió.
   // Cada acción toca únicamente sus propias filas, así que dos usuarios no pueden pisarse.
   useEffect(() => {
@@ -2130,7 +2189,7 @@ export default function App() {
             </div>
           </div>
           <div style={{ ...card, padding:"1.5rem" }}>
-            {usuario.rol === "administrador" && <PanelAdmin    data={data} setData={setData} />}
+            {usuario.rol === "administrador" && <PanelAdmin    data={data} setData={setData} onRestaurar={restaurarRespaldo} />}
             {usuario.rol === "digitador"     && <Digitador     data={data} setData={setData} />}
             {usuario.rol === "chofer"        && <VistaChofer   data={data} choferId={usuario.choferId} />}
             {usuario.rol === "inversionista" && <VistaInv      data={data} invId={usuario.inversionistaId} />}
