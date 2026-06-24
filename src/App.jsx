@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import * as XLSX from "xlsx";
 import { loadData, saveData, subscribeData } from "./db";
 
