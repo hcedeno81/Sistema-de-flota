@@ -10,20 +10,33 @@ const COLECCIONES = [
 ];
 
 // Lee todas las filas ACTIVAS y reconstruye { coleccion: [registros] } + un espejo { coleccion: { id: registro } }
+// IMPORTANTE: Supabase devuelve como máximo 1000 filas por consulta. Para no perder registros
+// cuando la base crece (sobre todo los pagos), se leen TODAS las filas por lotes (paginación).
 async function leerRegistros() {
   const datos = {}, mapa = {};
   COLECCIONES.forEach(c => { datos[c] = []; mapa[c] = {}; });
-  const { data, error } = await supabase
-    .from(TABLA)
-    .select("coleccion, registro_id, datos, activo")
-    .eq("activo", true);
-  if (error) throw error;
-  (data || []).forEach(fila => {
-    if (!datos[fila.coleccion]) { datos[fila.coleccion] = []; mapa[fila.coleccion] = {}; }
-    datos[fila.coleccion].push(fila.datos);
-    mapa[fila.coleccion][String(fila.registro_id)] = fila.datos;
-  });
-  return { datos, mapa, total: (data || []).length };
+
+  const LOTE = 1000;
+  let desde = 0, total = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(TABLA)
+      .select("coleccion, registro_id, datos, activo")
+      .eq("activo", true)
+      .order("registro_id", { ascending: true })   // orden estable para paginar sin huecos ni repetidos
+      .range(desde, desde + LOTE - 1);
+    if (error) throw error;
+    const filas = data || [];
+    filas.forEach(fila => {
+      if (!datos[fila.coleccion]) { datos[fila.coleccion] = []; mapa[fila.coleccion] = {}; }
+      datos[fila.coleccion].push(fila.datos);
+      mapa[fila.coleccion][String(fila.registro_id)] = fila.datos;
+    });
+    total += filas.length;
+    if (filas.length < LOTE) break;   // último lote: ya no hay más filas
+    desde += LOTE;
+  }
+  return { datos, mapa, total };
 }
 
 // Migra el blob viejo (app_state) a filas individuales. Se ejecuta UNA sola vez (cuando la tabla nueva está vacía).
