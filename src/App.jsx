@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import * as XLSX from "xlsx";
-import { loadData, saveData, subscribeData } from "./db";
+import { loadData, guardarRegistro, borrarRegistro, subscribeRegistros } from "./db";
 
 // ── Tokens de estilo ─────────────────────────────────────
 const W = "#ffffff", BG = "#f5f5f5", BR = "#dddddd", T = "#111111", T2 = "#555555";
@@ -1351,11 +1351,17 @@ function Digitador({ data, setData }) {
   const pagoDe     = (cid, f) => data.pagos.find(p => String(p.choferId) === String(cid) && p.fecha === f);
   const pendientes = (cid, hasta) => diasPendientes(data, cid, hasta);
 
-  const resumen = (cid) => {
-    const cont = { Cuota:0, Multa:0, Préstamo:0 };
-    diasPendientes(data, cid, fecha).forEach(p => { p.tipos.forEach(t => { cont[t] = (cont[t]||0) + 1; }); });
-    return cont;
-  };
+  // Agenda memorizada: calcula los días pendientes UNA sola vez por chofer.
+  // Solo se recalcula si cambian los datos o la fecha de corte (no al escribir en el modal).
+  const agenda = useMemo(() => data.choferes.map(c => {
+    const pend = diasPendientes(data, c.id, fecha);
+    const res  = { Cuota:0, Multa:0, Préstamo:0 };
+    pend.forEach(p => p.tipos.forEach(t => { res[t] = (res[t]||0) + 1; }));
+    const total = pend.reduce((s,p) => s + p.monto, 0);
+    const vehs  = [...new Set(data.deudas.filter(d => String(d.choferId)===String(c.id) && d.activa).map(d=>d.vehiculoId))]
+      .map(vid => data.vehiculos.find(v=>v.id===Number(vid))?.placa).filter(Boolean);
+    return { chofer:c, pend, res, total, vehs };
+  }), [data, fecha]);
 
   const abrirModal = (c) => {
     setSelC(c);
@@ -1363,13 +1369,10 @@ function Digitador({ data, setData }) {
     setSelDias({}); setErr(""); setModal(true);
   };
 
-  const totalComp = round2(Number(comp.totalComp || 0));
-  const totalAsig = round2(Object.values(selDias).reduce((s,d) => s + Number(d.monto||0), 0));
-  const saldo     = round2(totalComp - totalAsig);
-  const diasSel   = Object.keys(selDias);
-  const pendHoy   = selC ? pendientes(selC.id, fecha) : [];
-  const hayAtras  = pendHoy.some(p => !selDias[p.fecha]);
-  const futuros   = selC ? (() => {
+  // Días del chofer seleccionado (memorizados): no se recalculan al escribir montos/comprobante.
+  const pendHoy = useMemo(() => selC ? diasPendientes(data, selC.id, fecha) : [], [data, selC, fecha]);
+  const futuros = useMemo(() => {
+    if (!selC) return [];
     // Hasta el fin real de las deudas activas del chofer (antes estaba limitado a 180 días y 90 filas,
     // lo que ocultaba días registrables cuando el rango de la deuda era largo).
     const finMax = data.deudas
@@ -1377,7 +1380,13 @@ function Digitador({ data, setData }) {
       .map(d => d.fechaFin).filter(Boolean).sort().pop();
     if (!finMax || finMax <= fecha) return [];
     return diasPendientes(data, selC.id, finMax).filter(p => p.fecha > fecha);
-  })() : [];
+  }, [data, selC, fecha]);
+
+  const totalComp = round2(Number(comp.totalComp || 0));
+  const totalAsig = round2(Object.values(selDias).reduce((s,d) => s + Number(d.monto||0), 0));
+  const saldo     = round2(totalComp - totalAsig);
+  const diasSel   = Object.keys(selDias);
+  const hayAtras  = pendHoy.some(p => !selDias[p.fecha]);
   const combinado = [...pendHoy, ...futuros];
   const futSelez  = futuros.some(p => selDias[p.fecha]);
 
@@ -1487,11 +1496,7 @@ function Digitador({ data, setData }) {
 
       {data.choferes.length === 0 && <Vacío texto="No hay choferes registrados." />}
 
-      {data.choferes.map(c => {
-        const pend  = pendientes(c.id, fecha);
-        const res   = resumen(c.id);
-        const total = pend.reduce((s,p) => s + p.monto, 0);
-        const vehs  = [...new Set(data.deudas.filter(d => String(d.choferId)===String(c.id) && d.activa).map(d=>d.vehiculoId))].map(vid => data.vehiculos.find(v=>v.id===Number(vid))?.placa).filter(Boolean);
+      {agenda.map(({ chofer:c, pend, res, total, vehs }) => {
         return (
           <div key={c.id} style={{ ...card, marginBottom:12 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8 }}>
@@ -1626,47 +1631,57 @@ function Digitador({ data, setData }) {
 function VistaChofer({ data, choferId }) {
   const [tab, setTab] = useState("vencidos");
   const chofer = data.choferes.find(c => c.id === choferId);
+
+  // Todo el cálculo pesado (puntualidad día por día, pendientes, comprobantes) memorizado:
+  // solo se recalcula si cambian los datos o el chofer, no al cambiar de pestaña.
+  const calc = useMemo(() => {
+    if (!chofer) return null;
+
+    const deudas = data.deudas.filter(d => String(d.choferId) === String(choferId));
+    const ayer   = new Date(hoy() + "T12:00:00Z"); ayer.setUTCDate(ayer.getUTCDate()-1);
+    const ayerS  = ayer.toISOString().slice(0,10);
+
+    // Puntualidad: por cada día con cuota requerida hasta ayer, contar si quedó cubierto
+    const deudasAct = deudas.filter(d => d.activa);
+    const fechasIni = deudasAct.map(d => d.fechaInicio).filter(Boolean).sort();
+    const ay = parseF(ayerS);
+    let ok = 0, tot = 0;
+    let cur = fechasIni.length ? parseF(fechasIni[0]) : null;
+    let guard = 0;
+    while (cur && ay && cur <= ay && guard++ < 4000) {
+      const f = isoF(cur);
+      const ed = estadoDia(data, choferId, f);
+      if (ed.req > 0) { tot++; if (ed.condonado || ed.restante <= 0) ok++; }
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    const kpiPct = tot > 0 ? Math.round((ok/tot)*100) : 100;
+    const real   = data.pagos.filter(p => String(p.choferId)===String(choferId) && p.estado!=="no_pagado");
+
+    // Pendientes hasta hoy (indicador) y hasta el fin de las deudas (diario completo)
+    const finMax   = (deudasAct.map(d => d.fechaFin).filter(Boolean).sort().pop()) || hoy();
+    const hastaFin = finMax > hoy() ? finMax : hoy();
+    const pendHoy  = diasPendientes(data, choferId, hoy());
+    const pend     = diasPendientes(data, choferId, hastaFin).map(p => ({ fecha:p.fecha, monto:p.monto, tipos:p.tipos, montoTotal:p.montoTotal, abonado:p.abonado }));
+    // Vencidos: días pendientes hasta hoy. Por vencer: días pendientes con fecha posterior a hoy (sin repetir).
+    const vencidos  = pendHoy;
+    const porVencer = pend.filter(p => p.fecha > hoy());
+
+    // Agrupar pagos por comprobante para ver cómo se aplicó cada uno
+    const compMap = {};
+    real.filter(p => p.comprobante).forEach(p => {
+      const key = `${p.comprobante}||${p.banco}||${p.fechaComp}||${p.hora}`;
+      if (!compMap[key]) compMap[key] = { comprobante:p.comprobante, banco:p.banco, fechaComp:p.fechaComp||"", hora:p.hora||"", cuenta:p.cuentaDestino||"", total:0, items:[] };
+      compMap[key].total += Number(p.monto||0);
+      compMap[key].items.push(p);
+    });
+    const comprobantes = Object.values(compMap).sort((a,b) => String(b.fechaComp).localeCompare(String(a.fechaComp)));
+
+    return { kpiPct, real, pendHoy, pend, vencidos, porVencer, comprobantes };
+  }, [data, choferId, chofer]);
+
   if (!chofer) return <Vacío texto="Chofer no encontrado." />;
-
-  const deudas = data.deudas.filter(d => String(d.choferId) === String(choferId));
-  const ayer   = new Date(hoy() + "T12:00:00Z"); ayer.setUTCDate(ayer.getUTCDate()-1);
-  const ayerS  = ayer.toISOString().slice(0,10);
-
-  // Puntualidad: por cada día con cuota requerida hasta ayer, contar si quedó cubierto
-  const deudasAct = deudas.filter(d => d.activa);
-  const fechasIni = deudasAct.map(d => d.fechaInicio).filter(Boolean).sort();
-  const ay = parseF(ayerS);
-  let ok = 0, tot = 0;
-  let cur = fechasIni.length ? parseF(fechasIni[0]) : null;
-  let guard = 0;
-  while (cur && ay && cur <= ay && guard++ < 4000) {
-    const f = isoF(cur);
-    const ed = estadoDia(data, choferId, f);
-    if (ed.req > 0) { tot++; if (ed.condonado || ed.restante <= 0) ok++; }
-    cur.setDate(cur.getDate() + 1);
-  }
-
-  const kpiPct = tot > 0 ? Math.round((ok/tot)*100) : 100;
-  const real   = data.pagos.filter(p => String(p.choferId)===String(choferId) && p.estado!=="no_pagado");
-
-  // Pendientes hasta hoy (indicador) y hasta el fin de las deudas (diario completo)
-  const finMax   = (deudasAct.map(d => d.fechaFin).filter(Boolean).sort().pop()) || hoy();
-  const hastaFin = finMax > hoy() ? finMax : hoy();
-  const pendHoy  = diasPendientes(data, choferId, hoy());
-  const pend     = diasPendientes(data, choferId, hastaFin).map(p => ({ fecha:p.fecha, monto:p.monto, tipos:p.tipos, montoTotal:p.montoTotal, abonado:p.abonado }));
-  // Vencidos: días pendientes hasta hoy. Por vencer: días pendientes con fecha posterior a hoy (sin repetir).
-  const vencidos  = pendHoy;
-  const porVencer = pend.filter(p => p.fecha > hoy());
-
-  // Agrupar pagos por comprobante para ver cómo se aplicó cada uno
-  const compMap = {};
-  real.filter(p => p.comprobante).forEach(p => {
-    const key = `${p.comprobante}||${p.banco}||${p.fechaComp}||${p.hora}`;
-    if (!compMap[key]) compMap[key] = { comprobante:p.comprobante, banco:p.banco, fechaComp:p.fechaComp||"", hora:p.hora||"", cuenta:p.cuentaDestino||"", total:0, items:[] };
-    compMap[key].total += Number(p.monto||0);
-    compMap[key].items.push(p);
-  });
-  const comprobantes = Object.values(compMap).sort((a,b) => String(b.fechaComp).localeCompare(String(a.fechaComp)));
+  const { kpiPct, real, pendHoy, pend, vencidos, porVencer, comprobantes } = calc;
 
   const exportar = () => {
     const realF = real.map(p => ({ Fecha:p.fecha, Hora:p.hora, Comprobante:p.comprobante, Banco:p.banco, "Monto ($)":Number(p.monto), Tipo:p.tipo, Estado:p.estado, Registro:p.esImputacion?"Imputación a futuro":"Pago normal" }));
@@ -1929,60 +1944,112 @@ export default function App() {
   const [data,    setData]    = useState(INIT);
   const [usuario, setUsuario] = useState(null);
   const [cargando, setCargando] = useState(true);
+  const [cargaError, setCargaError] = useState(false);
   const [estado,  setEstado]  = useState("listo"); // listo | guardando | guardado | error
-  const listo = useRef(false);
-  const dataRef = useRef(data);          // espejo siempre actualizado de data
-  const aplicandoRemoto = useRef(false); // evita reescribir cuando el cambio viene de otro usuario
-  useEffect(() => { dataRef.current = data; }, [data]);
+  const listo         = useRef(false);
+  const puedeGuardar  = useRef(false); // SOLO true si la carga inicial tuvo éxito. Si falla, NO se guarda nada.
+  const syncRef       = useRef({});    // espejo { coleccion: { id: registro } } de lo que está en la base
   const rc = { administrador:"#4A6FA5", digitador:"#7B6EA5", chofer:"#3A8A6E", inversionista:"#A56B3A" };
 
-  // Cargar datos guardados al iniciar
-  useEffect(() => {
-    let activo = true;
-    (async () => {
-      try {
-        const parsed = await loadData();
-        if (activo && parsed) {
-          if (!parsed.usuarios || parsed.usuarios.length === 0) parsed.usuarios = INIT.usuarios;
-          Object.keys(INIT).forEach(k => { if (!parsed[k]) parsed[k] = INIT[k]; });
-          setData(parsed);
-        }
-      } catch (e) {
-        console.error("Error al cargar desde Supabase:", e);
-      } finally {
-        if (activo) { setCargando(false); listo.current = true; }
-      }
-    })();
-    return () => { activo = false; };
-  }, []);
+  // Convierte el objeto data { coleccion: [registros] } a un mapa plano { coleccion: { id: registro } }
+  const aMapa = (obj) => {
+    const m = {};
+    Object.keys(INIT).forEach(col => {
+      m[col] = {};
+      (obj[col] || []).forEach(r => { if (r && r.id != null) m[col][String(r.id)] = r; });
+    });
+    return m;
+  };
 
-  // Guardar automáticamente ante cualquier cambio
+  // Carga inicial con reintento. Si la base no responde, BLOQUEA el guardado para no escribir vacío encima de todo.
+  const cargar = async () => {
+    try {
+      const { datos } = await loadData();
+      const completo = { ...INIT, ...datos };
+      Object.keys(INIT).forEach(k => { if (!completo[k]) completo[k] = INIT[k]; });
+      if (!completo.usuarios || completo.usuarios.length === 0) completo.usuarios = INIT.usuarios;
+      syncRef.current = aMapa({ ...completo, usuarios: (datos.usuarios && datos.usuarios.length) ? datos.usuarios : [] });
+      setData(completo);
+      puedeGuardar.current = true;   // ✅ habilita el guardado solo tras una carga exitosa
+      listo.current = true;
+      setCargaError(false);
+      setCargando(false);
+    } catch (e) {
+      console.error("Error al cargar:", e);
+      puedeGuardar.current = false;  // ⛔ carga fallida: el sistema queda en pausa
+      setCargaError(true);
+      setCargando(false);
+      setTimeout(cargar, 4000);      // reintenta solo
+    }
+  };
+
+  useEffect(() => { cargar(); }, []);
+
+  // Guardado por REGISTRO: compara el estado actual con el espejo y escribe SOLO lo que cambió.
+  // Cada acción toca únicamente sus propias filas, así que dos usuarios no pueden pisarse.
   useEffect(() => {
-    if (!listo.current) return;
-    if (aplicandoRemoto.current) { aplicandoRemoto.current = false; return; }
+    if (!listo.current || !puedeGuardar.current) return;
     let activo = true;
     (async () => {
+      const nuevo = aMapa(data);
+      const viejo = syncRef.current;
+      const ops = [];
+      Object.keys(INIT).forEach(col => {
+        const nReg = nuevo[col] || {}, vReg = viejo[col] || {};
+        // Altas y cambios
+        Object.keys(nReg).forEach(id => {
+          if (vReg[id] === nReg[id]) return; // misma referencia: sin cambios
+          if (!vReg[id] || JSON.stringify(vReg[id]) !== JSON.stringify(nReg[id]))
+            ops.push({ tipo:"upsert", col, id, datos:nReg[id] });
+        });
+        // Eliminaciones (borrado suave)
+        Object.keys(vReg).forEach(id => { if (!nReg[id]) ops.push({ tipo:"borrar", col, id }); });
+      });
+      if (ops.length === 0) return;
       try {
         setEstado("guardando");
-        await saveData(data);
+        for (const op of ops) {
+          if (op.tipo === "upsert") await guardarRegistro(op.col, op.datos);
+          else                      await borrarRegistro(op.col, op.id);
+        }
+        // Actualiza el espejo SOLO con lo que se escribió con éxito
+        const m = {};
+        Object.keys(INIT).forEach(col => { m[col] = { ...(syncRef.current[col] || {}) }; });
+        ops.forEach(op => { if (op.tipo === "upsert") m[op.col][op.id] = op.datos; else delete m[op.col][op.id]; });
+        syncRef.current = m;
         if (activo) { setEstado("guardado"); setTimeout(() => activo && setEstado("listo"), 1500); }
       } catch (e) {
-        if (activo) setEstado("error");
+        console.error("Error al guardar:", e);
+        if (activo) setEstado("error"); // no actualiza el espejo → reintenta en el próximo cambio
       }
     })();
     return () => { activo = false; };
   }, [data]);
 
-  // Sincronización en tiempo real: refresca cuando otro usuario guarda
+  // Tiempo real por registro: fusiona el cambio de otro usuario sin tocar el resto del trabajo en curso.
   useEffect(() => {
-    const cancelar = subscribeData((remoto) => {
-      // Ignora el eco de nuestro propio guardado (contenido idéntico)
-      if (JSON.stringify(remoto) === JSON.stringify(dataRef.current)) return;
-      // Garantiza que existan todas las colecciones
-      Object.keys(INIT).forEach(k => { if (!remoto[k]) remoto[k] = INIT[k]; });
-      if (!remoto.usuarios || remoto.usuarios.length === 0) remoto.usuarios = INIT.usuarios;
-      aplicandoRemoto.current = true; // no reescribir este cambio entrante
-      setData(remoto);
+    const cancelar = subscribeRegistros(({ col, id, datos, eliminado }) => {
+      if (!col || !Object.keys(INIT).includes(col)) return;
+      // Actualiza el espejo PRIMERO para que el guardado no reescriba este cambio entrante
+      const m = { ...syncRef.current };
+      m[col] = { ...(syncRef.current[col] || {}) };
+      if (eliminado) delete m[col][String(id)];
+      else if (datos) m[col][String(id)] = datos;
+      syncRef.current = m;
+      // Fusiona en la pantalla
+      setData(prev => {
+        const lista = prev[col] || [];
+        let nueva;
+        if (eliminado) {
+          nueva = lista.filter(r => String(r.id) !== String(id));
+        } else if (datos) {
+          const existe = lista.some(r => String(r.id) === String(id));
+          nueva = existe ? lista.map(r => String(r.id) === String(id) ? datos : r) : [...lista, datos];
+        } else {
+          nueva = lista;
+        }
+        return { ...prev, [col]: nueva };
+      });
     });
     return cancelar;
   }, []);
@@ -1996,6 +2063,20 @@ export default function App() {
         <div style={{ textAlign:"center", color:T2 }}>
           <div style={{ width:48, height:48, borderRadius:14, background:"#4A6FA5", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><span style={{ fontSize:24 }}>🚌</span></div>
           <div style={{ fontSize:14 }}>Cargando datos guardados…</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Arranque blindado: si la carga falló, NO dejamos entrar ni guardar (evita escribir vacío sobre la base buena).
+  if (cargaError) {
+    return (
+      <div style={{ fontFamily:"var(--font-sans)", maxWidth:720, margin:"0 auto", padding:"1rem", background:BG, minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <div style={{ ...card, maxWidth:430, textAlign:"center" }}>
+          <div style={{ width:48, height:48, borderRadius:14, background:"#c0392b", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}><span style={{ fontSize:24 }}>⚠️</span></div>
+          <h2 style={{ fontSize:17, fontWeight:500, margin:"0 0 8px", color:T }}>Sin conexión con la base de datos</h2>
+          <p style={{ fontSize:13, color:T2, margin:"0 0 16px" }}>No se pudieron cargar los datos. Para proteger tu información, el sistema queda en pausa y <b>no guardará nada</b> hasta reconectarse. Reintentando automáticamente…</p>
+          <Btn v="primary" onClick={() => { setCargaError(false); setCargando(true); cargar(); }}>Reintentar ahora</Btn>
         </div>
       </div>
     );
