@@ -14,6 +14,16 @@ const TD    = { padding: "6px 8px", borderBottom: `1px solid ${BR}`, color: T };
 // ── Clave de almacenamiento persistente ──────────────────
 const STORAGE_KEY = "flota_data_v1";
 
+// ── Generador de IDs únicos ──────────────────────────────
+// CRÍTICO: reemplaza a Date.now(). Date.now() es el reloj del dispositivo de cada
+// usuario; dos personas (web + celular) creando un registro en el mismo milisegundo
+// generaban el MISMO registro_id y, como (coleccion, registro_id) es la clave primaria,
+// el upsert del segundo SOBRESCRIBÍA la fila del primero → el registro "desaparecía".
+// crypto.randomUUID() garantiza unicidad global. El fallback cubre navegadores muy viejos.
+const nuevoId = () =>
+  (globalThis.crypto?.randomUUID?.() ||
+   (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10)));
+
 // ── Datos iniciales ──────────────────────────────────────
 const INIT = {
   vehiculos:       [],
@@ -270,7 +280,7 @@ function Vehiculos({ data, setData }) {
     const miss = vacio(form, campos.map(c => c[0]));
     if (miss.length) { setErr("Requeridos: " + campos.filter(c => miss.includes(c[0])).map(c => c[1]).join(", ")); return; }
     if (editId) setData(d => ({ ...d, vehiculos: d.vehiculos.map(v => v.id === editId ? { ...form, id: editId } : v) }));
-    else        setData(d => ({ ...d, vehiculos: [...d.vehiculos, { ...form, id: Date.now() }] }));
+    else        setData(d => ({ ...d, vehiculos: [...d.vehiculos, { ...form, id: nuevoId() }] }));
     setModal(false);
   };
 
@@ -413,7 +423,7 @@ function Bancos({ data, setData }) {
   const guardar = () => {
     if (!form.nombre?.trim()) { setErr("El nombre es requerido."); return; }
     if (editId) setData(d => ({ ...d, bancos: d.bancos.map(b => b.id === editId ? {...form, id:editId} : b) }));
-    else        setData(d => ({ ...d, bancos: [...d.bancos, {...form, id:Date.now()}] }));
+    else        setData(d => ({ ...d, bancos: [...d.bancos, {...form, id:nuevoId()}] }));
     setModal(false);
   };
 
@@ -458,7 +468,7 @@ function Cuentas({ data, setData }) {
   const guardar = () => {
     if (vacio(form, ["banco","numero","titular"]).length) { setErr("Todos los campos son requeridos."); return; }
     if (editId) setData(d => ({ ...d, cuentas: d.cuentas.map(c => c.id === editId ? {...form, id:editId} : c) }));
-    else        setData(d => ({ ...d, cuentas: [...d.cuentas, {...form, id:Date.now()}] }));
+    else        setData(d => ({ ...d, cuentas: [...d.cuentas, {...form, id:nuevoId()}] }));
     setModal(false);
   };
 
@@ -584,7 +594,7 @@ function Deudas({ data, setData }) {
         return;
       }
     }
-    const rec = { ...form, activa: form.activa !== false, id: editId || Date.now() };
+    const rec = { ...form, activa: form.activa !== false, id: editId || nuevoId() };
     if (rec.formaPago === "manual") {
       rec.montoManual = Number(rec.montoManual);
       rec.fechaInicio = rec.fechaManual;
@@ -757,13 +767,13 @@ function Inversiones({ data, setData }) {
 
   const guardarGasto = () => {
     if (vacio(fG, ["fecha","vehiculoId","monto","descripcion"]).length) { setErrG("Todos los campos son requeridos."); return; }
-    setData(d => ({ ...d, gastosInv: [...d.gastosInv, {...fG, id:Date.now(), monto:Number(fG.monto)}] }));
+    setData(d => ({ ...d, gastosInv: [...d.gastosInv, {...fG, id:nuevoId(), monto:Number(fG.monto)}] }));
     setMG(false);
   };
 
   const guardarPago = () => {
     if (vacio(fP, ["fecha","monto","tipo","metodoPago","referencia"]).length) { setErrP("Todos los campos son requeridos."); return; }
-    setData(d => ({ ...d, pagosInv: [...d.pagosInv, {...fP, id:Date.now(), monto:Number(fP.monto), realizado:true}] }));
+    setData(d => ({ ...d, pagosInv: [...d.pagosInv, {...fP, id:nuevoId(), monto:Number(fP.monto), realizado:true}] }));
     setMP(false);
   };
 
@@ -873,7 +883,7 @@ function Usuarios({ data, setData }) {
 
     if (rol === "chofer") {
       if (!editId || !form.choferId) {
-        const nc = { ...fCh, id: Date.now() };
+        const nc = { ...fCh, id: nuevoId() };
         setData(d => ({ ...d, choferes: [...d.choferes, nc] }));
         choferId = nc.id;
       } else {
@@ -883,7 +893,7 @@ function Usuarios({ data, setData }) {
 
     if (rol === "inversionista") {
       if (!editId || !form.inversionistaId) {
-        const ni = { ...fInv, id:Date.now()+1, monto:Number(fInv.monto), diaPagoIntereses:Number(fInv.diaPagoIntereses), diaPagoCapital:Number(fInv.diaPagoCapital) };
+        const ni = { ...fInv, id:nuevoId(), monto:Number(fInv.monto), diaPagoIntereses:Number(fInv.diaPagoIntereses), diaPagoCapital:Number(fInv.diaPagoCapital) };
         setData(d => ({ ...d, inversionistas: [...d.inversionistas, ni] }));
         invId = ni.id;
       } else {
@@ -892,7 +902,7 @@ function Usuarios({ data, setData }) {
     }
 
     const nombre = rol === "chofer" ? fCh.nombres : rol === "inversionista" ? fInv.nombres : form.nombre;
-    const u = { ...form, rol, activo:true, id:editId||Date.now()+2, nombre, choferId, inversionistaId:invId };
+    const u = { ...form, rol, activo:true, id:editId||nuevoId(), nombre, choferId, inversionistaId:invId };
     if (editId) setData(d => ({ ...d, usuarios: d.usuarios.map(x => x.id === editId ? u : x) }));
     else        setData(d => ({ ...d, usuarios: [...d.usuarios, u] }));
     setModal(false);
@@ -1425,7 +1435,7 @@ function Digitador({ data, setData }) {
     if (comprobanteDuplicado(data, comp.numero, comp.banco, fecha, comp.hora))     { setErr("Comprobante duplicado: mismo número, banco, fecha y hora ya registrados."); return; }
 
     const nuevos = diasSel.map(f => ({
-      id: Date.now() + Math.random(),
+      id: nuevoId(),
       choferId: selC.id, fecha:f, fechaComp:fecha, hora:comp.hora,
       monto: Number(selDias[f].monto), estado: selDias[f].estado,
       tipo: (combinado.find(p => p.fecha===f)?.tipos || []).join(" + "),
@@ -1985,6 +1995,17 @@ export default function App() {
 
   useEffect(() => { cargar(); }, []);
 
+  // Resincroniza el estado con la base. Se usa tras un fallo de guardado para que
+  // los registros que NO se escribieron se caigan de la pantalla (no quedan "fantasma").
+  const resincronizar = async () => {
+    const { datos } = await loadData();
+    const completo = { ...INIT, ...datos };
+    Object.keys(INIT).forEach(k => { if (!completo[k]) completo[k] = INIT[k]; });
+    if (!completo.usuarios || completo.usuarios.length === 0) completo.usuarios = INIT.usuarios;
+    syncRef.current = aMapa(completo);
+    setData(completo);
+  };
+
   // Guardado por REGISTRO: compara el estado actual con el espejo y escribe SOLO lo que cambió.
   // Cada acción toca únicamente sus propias filas, así que dos usuarios no pueden pisarse.
   useEffect(() => {
@@ -2020,7 +2041,13 @@ export default function App() {
         if (activo) { setEstado("guardado"); setTimeout(() => activo && setEstado("listo"), 1500); }
       } catch (e) {
         console.error("Error al guardar:", e);
-        if (activo) setEstado("error"); // no actualiza el espejo → reintenta en el próximo cambio
+        // NO actualizamos el espejo → el cambio se reintenta en la próxima edición.
+        // Además resincronizamos con la base: lo que no se guardó desaparece de la pantalla,
+        // así el usuario nunca cree que guardó algo que Supabase rechazó.
+        if (activo) {
+          setEstado("error");
+          try { await resincronizar(); } catch (e2) { console.error("Error al resincronizar:", e2); }
+        }
       }
     })();
     return () => { activo = false; };
