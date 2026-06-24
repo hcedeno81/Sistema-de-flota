@@ -1,39 +1,105 @@
 import { supabase } from "./supabaseClient";
 
-const ROW_ID = "flota_data_v1";
+const TABLA   = "flota_registros";
+const BLOB_ID = "flota_data_v1"; // documento viejo (app_state), solo para migración única
 
-// Lee el documento completo (o null si aún no hay datos guardados)
-export async function loadData() {
+// Las colecciones de la app. Cada registro vive en su propia fila.
+const COLECCIONES = [
+  "vehiculos", "choferes", "bancos", "cuentas", "inversionistas",
+  "deudas", "pagos", "pagosInv", "gastosInv", "usuarios",
+];
+
+// Lee todas las filas ACTIVAS y reconstruye { coleccion: [registros] } + un espejo { coleccion: { id: registro } }
+async function leerRegistros() {
+  const datos = {}, mapa = {};
+  COLECCIONES.forEach(c => { datos[c] = []; mapa[c] = {}; });
+
   const { data, error } = await supabase
-    .from("app_state")
-    .select("contenido")
-    .eq("id", ROW_ID)
-    .maybeSingle();
+    .from(TABLA)
+    .select("coleccion, registro_id, datos, activo")
+    .eq("activo", true);
   if (error) throw error;
-  return data?.contenido ?? null;
+
+  (data || []).forEach(fila => {
+    if (!datos[fila.coleccion]) { datos[fila.coleccion] = []; mapa[fila.coleccion] = {}; }
+    datos[fila.coleccion].push(fila.datos);
+    mapa[fila.coleccion][String(fila.registro_id)] = fila.datos;
+  });
+
+  return { datos, mapa, total: (data || []).length };
 }
 
-// Guarda (inserta o actualiza) el documento completo
-export async function saveData(obj) {
-  const { error } = await supabase
-    .from("app_state")
-    .upsert({ id: ROW_ID, contenido: obj, updated_at: new Date().toISOString() });
+// Migra el blob viejo (app_state) a filas individuales. Se ejecuta UNA sola vez (cuando la tabla nueva está vacía).
+async function migrarBlob() {
+  const { data, error } = await supabase
+    .from("app_state").select("contenido").eq("id", BLOB_ID).maybeSingle();
+  if (error) throw error;
+
+  const blob = data?.contenido;
+  if (!blob || typeof blob !== "object") return false;
+
+  const filas = [];
+  COLECCIONES.forEach(col => {
+    (blob[col] || []).forEach(r => {
+      if (r && r.id != null) filas.push({ coleccion: col, registro_id: String(r.id), datos: r, activo: true });
+    });
+  });
+  if (!filas.length) return false;
+
+  // Insertar en lotes para no exceder límites
+  for (let i = 0; i < filas.length; i += 500) {
+    const { error: e2 } = await supabase.from(TABLA).upsert(filas.slice(i, i + 500));
+    if (e2) throw e2;
+  }
+  return true;
+}
+
+// Carga inicial: si la tabla nueva está vacía, intenta migrar el blob viejo y vuelve a leer.
+export async function loadData() {
+  let r = await leerRegistros();
+  if (r.total === 0) {
+    const migrado = await migrarBlob();
+    if (migrado) r = await leerRegistros();
+  }
+  return r; // { datos, mapa, total }
+}
+
+// Guarda (inserta o actualiza) UN solo registro. No toca ninguna otra fila.
+export async function guardarRegistro(coleccion, registro) {
+  const { error } = await supabase.from(TABLA).upsert({
+    coleccion,
+    registro_id: String(registro.id),
+    datos: registro,
+    activo: true,
+    updated_at: new Date().toISOString(),
+  });
   if (error) throw error;
 }
 
-// Se suscribe a los cambios de la fila. Llama a onChange(contenido) cada vez
-// que OTRO usuario guarda. Devuelve una función para cancelar la suscripción.
-export function subscribeData(onChange) {
-  const channel = supabase
-    .channel("app_state_changes")
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "app_state", filter: `id=eq.${ROW_ID}` },
-      (payload) => {
-        const nuevo = payload.new?.contenido;
-        if (nuevo) onChange(nuevo);
-      }
-    )
+// Borrado SUAVE: marca la fila como inactiva en vez de eliminarla. Nada se pierde de verdad.
+export async function borrarRegistro(coleccion, id) {
+  const { error } = await supabase.from(TABLA)
+    .update({ activo: false, updated_at: new Date().toISOString() })
+    .eq("coleccion", coleccion)
+    .eq("registro_id", String(id));
+  if (error) throw error;
+}
+
+// Suscripción en tiempo real a cambios de registros individuales.
+// Llama onCambio({ col, id, datos, eliminado }) por cada inserción/edición/borrado de OTRO usuario.
+export function subscribeRegistros(onCambio) {
+  const ch = supabase
+    .channel("flota_registros_changes")
+    .on("postgres_changes", { event: "*", schema: "public", table: TABLA }, (payload) => {
+      const fila = payload.new || payload.old;
+      if (!fila || !fila.coleccion) return;
+      onCambio({
+        col: fila.coleccion,
+        id: fila.registro_id,
+        datos: fila.datos,
+        eliminado: payload.eventType === "DELETE" || fila.activo === false,
+      });
+    })
     .subscribe();
-  return () => supabase.removeChannel(channel);
+  return () => supabase.removeChannel(ch);
 }
