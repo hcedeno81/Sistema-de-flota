@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
-import { loadData, saveData } from "./db";
+import { loadData, saveData, subscribeData } from "./db";
 
 // ── Tokens de estilo ─────────────────────────────────────
 const W = "#ffffff", BG = "#f5f5f5", BR = "#dddddd", T = "#111111", T2 = "#555555";
@@ -1931,6 +1931,9 @@ export default function App() {
   const [cargando, setCargando] = useState(true);
   const [estado,  setEstado]  = useState("listo"); // listo | guardando | guardado | error
   const listo = useRef(false);
+  const dataRef = useRef(data);          // espejo siempre actualizado de data
+  const aplicandoRemoto = useRef(false); // evita reescribir cuando el cambio viene de otro usuario
+  useEffect(() => { dataRef.current = data; }, [data]);
   const rc = { administrador:"#4A6FA5", digitador:"#7B6EA5", chofer:"#3A8A6E", inversionista:"#A56B3A" };
 
   // Cargar datos guardados al iniciar
@@ -1956,6 +1959,7 @@ export default function App() {
   // Guardar automáticamente ante cualquier cambio
   useEffect(() => {
     if (!listo.current) return;
+    if (aplicandoRemoto.current) { aplicandoRemoto.current = false; return; }
     let activo = true;
     (async () => {
       try {
@@ -1968,6 +1972,20 @@ export default function App() {
     })();
     return () => { activo = false; };
   }, [data]);
+
+  // Sincronización en tiempo real: refresca cuando otro usuario guarda
+  useEffect(() => {
+    const cancelar = subscribeData((remoto) => {
+      // Ignora el eco de nuestro propio guardado (contenido idéntico)
+      if (JSON.stringify(remoto) === JSON.stringify(dataRef.current)) return;
+      // Garantiza que existan todas las colecciones
+      Object.keys(INIT).forEach(k => { if (!remoto[k]) remoto[k] = INIT[k]; });
+      if (!remoto.usuarios || remoto.usuarios.length === 0) remoto.usuarios = INIT.usuarios;
+      aplicandoRemoto.current = true; // no reescribir este cambio entrante
+      setData(remoto);
+    });
+    return cancelar;
+  }, []);
 
   const estadoTxt = { listo:"", guardando:"Guardando…", guardado:"✓ Guardado", error:"⚠ Error al guardar" };
   const estadoCol = { listo:T2, guardando:"#856404", guardado:"#15803d", error:"#c0392b" };
