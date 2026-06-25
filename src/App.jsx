@@ -241,6 +241,18 @@ const Modal = ({ title, children }) => (
 
 const Acciones = ({ children }) => <div style={{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:4 }}>{children}</div>;
 
+// Modal de confirmación de borrado reutilizable. Como el borrado ahora es DEFINITIVO
+// (elimina la fila de la base), siempre se pide confirmación antes de ejecutarlo.
+const ConfirmBorrado = ({ mensaje, onCancelar, onConfirmar }) => (
+  <Modal title="Confirmar eliminación">
+    <Info>{mensaje} <b>Esta acción es definitiva y no se puede deshacer.</b></Info>
+    <Acciones>
+      <Btn onClick={onCancelar}>Cancelar</Btn>
+      <Btn v="danger" onClick={onConfirmar}>Eliminar definitivamente</Btn>
+    </Acciones>
+  </Modal>
+);
+
 const Steps = ({ steps, cur }) => (
   <div style={{ display:"flex", marginBottom:20 }}>
     {steps.map((s, i) => (
@@ -263,6 +275,7 @@ function Vehiculos({ data, setData }) {
   const [rVeh,    setRVeh]    = useState(null);
   const [rChofer, setRChofer] = useState("");
   const [err,     setErr]     = useState("");
+  const [aBorrar, setABorrar] = useState(null);
 
   const campos = [
     ["placa","Placa","text"],["marca","Marca","text"],["modelo","Modelo","text"],["anio","Año","text"],
@@ -286,7 +299,11 @@ function Vehiculos({ data, setData }) {
 
   const eliminar = (v) => {
     if (vehiculoTieneDeudas(data, v.id)) { alert("No se puede eliminar: vehículo con deudas vinculadas."); return; }
-    setData(d => ({ ...d, vehiculos: d.vehiculos.filter(x => x.id !== v.id) }));
+    setABorrar(v);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, vehiculos: d.vehiculos.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
 
   const reasignar = () => {
@@ -341,6 +358,7 @@ function Vehiculos({ data, setData }) {
           <Acciones><Btn onClick={() => setRModal(false)}>Cancelar</Btn><Btn v="primary" onClick={reasignar}>Reasignar</Btn></Acciones>
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar el vehículo ${aBorrar.placa} — ${aBorrar.marca} ${aBorrar.modelo}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
@@ -350,6 +368,7 @@ function Choferes({ data, setData }) {
   const [form,   setForm]   = useState({});
   const [editId, setEditId] = useState(null);
   const [err,    setErr]    = useState("");
+  const [aBorrar, setABorrar] = useState(null);
 
   const campos = [
     ["nombres","Nombres completos","text"],["cedulaNum","Cédula","text"],
@@ -371,7 +390,11 @@ function Choferes({ data, setData }) {
   const eliminar = (c) => {
     if (choferTieneDeudaActiva(data, c.id)) { alert("No se puede eliminar: el chofer tiene deudas activas."); return; }
     if (choferTienePagos(data, c.id))       { alert("No se puede eliminar: el chofer tiene pagos registrados."); return; }
-    setData(d => ({ ...d, choferes: d.choferes.filter(x => x.id !== c.id) }));
+    setABorrar(c);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, choferes: d.choferes.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
 
   return (
@@ -405,6 +428,7 @@ function Choferes({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar al chofer ${aBorrar.nombres}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
@@ -414,11 +438,16 @@ function Bancos({ data, setData }) {
   const [form,   setForm]   = useState({});
   const [editId, setEditId] = useState(null);
   const [err,    setErr]    = useState("");
+  const [aBorrar, setABorrar] = useState(null);
 
   const abrir   = (b = null) => { setForm(b || {}); setEditId(b?.id || null); setErr(""); setModal(true); };
   const eliminar = (b) => {
     if (bancoEnUso(data, b.nombre)) { alert("No se puede eliminar: banco en uso en pagos registrados."); return; }
-    setData(d => ({ ...d, bancos: d.bancos.filter(x => x.id !== b.id) }));
+    setABorrar(b);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, bancos: d.bancos.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
   const guardar = () => {
     if (!form.nombre?.trim()) { setErr("El nombre es requerido."); return; }
@@ -450,6 +479,7 @@ function Bancos({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar el banco ${aBorrar.nombre}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
@@ -459,11 +489,16 @@ function Cuentas({ data, setData }) {
   const [form,   setForm]   = useState({});
   const [editId, setEditId] = useState(null);
   const [err,    setErr]    = useState("");
+  const [aBorrar, setABorrar] = useState(null);
 
   const abrir    = (c = null) => { setForm(c || {}); setEditId(c?.id || null); setErr(""); setModal(true); };
   const eliminar = (c) => {
     if (cuentaEnUso(data, c.numero)) { alert("No se puede eliminar: cuenta en uso en pagos registrados."); return; }
-    setData(d => ({ ...d, cuentas: d.cuentas.filter(x => x.id !== c.id) }));
+    setABorrar(c);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, cuentas: d.cuentas.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
   const guardar = () => {
     if (vacio(form, ["banco","numero","titular"]).length) { setErr("Todos los campos son requeridos."); return; }
@@ -497,6 +532,7 @@ function Cuentas({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar la cuenta de ${aBorrar.titular} (${aBorrar.banco} · ${aBorrar.numero}).`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
@@ -506,13 +542,18 @@ function Inversionistas({ data, setData }) {
   const [form,   setForm]   = useState({});
   const [editId, setEditId] = useState(null);
   const [err,    setErr]    = useState("");
+  const [aBorrar, setABorrar] = useState(null);
 
   const campos = ["nombres","contacto","monto","fechaEntrega","diaPagoIntereses","diaPagoCapital","vehiculoId"];
 
   const abrir    = (i) => { setForm({...i}); setEditId(i.id); setErr(""); setModal(true); };
   const eliminar = (i) => {
     if (invEnUso(data, i.id)) { alert("No se puede eliminar: inversionista con gastos o pagos registrados."); return; }
-    setData(d => ({ ...d, inversionistas: d.inversionistas.filter(x => x.id !== i.id) }));
+    setABorrar(i);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, inversionistas: d.inversionistas.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
   const guardar = () => {
     if (vacio(form, campos).length) { setErr("Todos los campos son requeridos."); return; }
@@ -562,6 +603,7 @@ function Inversionistas({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar al inversionista ${aBorrar.nombres}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
@@ -841,6 +883,7 @@ function Usuarios({ data, setData }) {
   const [err,    setErr]    = useState("");
   const [showP,  setShowP]  = useState(false);
   const [editId, setEditId] = useState(null);
+  const [aBorrar, setABorrar] = useState(null);
 
   const camposCh = [
     ["nombres","Nombres completos","text"],["cedulaNum","Cédula","text"],
@@ -912,7 +955,11 @@ function Usuarios({ data, setData }) {
     if (u.rol === "administrador") {
       if (data.usuarios.filter(x => x.rol === "administrador" && x.activo).length <= 1) { alert("Debe existir al menos un administrador."); return; }
     }
-    setData(d => ({ ...d, usuarios: d.usuarios.filter(x => x.id !== u.id) }));
+    setABorrar(u);
+  };
+  const confirmarBorrado = () => {
+    setData(d => ({ ...d, usuarios: d.usuarios.filter(x => x.id !== aBorrar.id) }));
+    setABorrar(null);
   };
 
   const rc = { administrador:"blue", digitador:"amber", chofer:"green", inversionista:"gray" };
@@ -1017,6 +1064,7 @@ function Usuarios({ data, setData }) {
           )}
         </Modal>
       )}
+      {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar al usuario ${aBorrar.nombre} (${aBorrar.email}).`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
     </div>
   );
 }
