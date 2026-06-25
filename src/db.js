@@ -96,16 +96,16 @@ export async function guardarRegistro(coleccion, registro) {
 
 // Borrado SUAVE: marca la fila como inactiva en vez de eliminarla. Nada se pierde de verdad.
 // .select() confirma que efectivamente se tocó una fila.
+// Borrado REAL: elimina la fila de la base por completo. No se puede deshacer,
+// por eso la interfaz pide confirmación antes de llamar a esta función.
+// Es idempotente: si la fila ya no existe, no es un error (el objetivo ya se cumplió).
 export async function borrarRegistro(coleccion, id) {
-  const { data, error } = await supabase
+  const { error } = await supabase
     .from(TABLA)
-    .update({ activo: false, updated_at: new Date().toISOString() })
+    .delete()
     .eq("coleccion", coleccion)
-    .eq("registro_id", String(id))
-    .select();
+    .eq("registro_id", String(id));
   if (error) throw error;
-  if (!data || data.length === 0)
-    throw new Error(`Borrado no confirmado para ${coleccion}/${id}`);
 }
 
 // Suscripción en tiempo real a cambios de registros individuales.
