@@ -130,10 +130,34 @@ const montoRequerido = (data, cid, f) =>
   data.deudas.filter(d => String(d.choferId)===String(cid) && d.activa && d.fechaInicio<=f && d.fechaFin>=f)
     .reduce((s,d) => s + calcMontoDia(d, f), 0);
 
+// Deudas que GENERAN cargo (> 0) ese día concreto para ese chofer
+const deudasDelDia = (data, cid, f) =>
+  data.deudas.filter(d => String(d.choferId)===String(cid) && d.activa && d.fechaInicio<=f && d.fechaFin>=f && calcMontoDia(d, f) > 0);
+
+// ¿Este pago corresponde a alguna de las deudas que TODAVÍA aplican ese día?
+// CRÍTICO: antes el saldo del día = (requerido del día − TODOS los pagos del día), sin mirar a
+// qué deuda pertenecían. Por eso, al crear una "deuda de pago único" (manual) en una fecha que ya
+// tenía un pago de otra deuda (p.ej. una cuota dominical), ese pago se descontaba del monto nuevo:
+// $36 − $30 = $6. Ahora cada pago solo descuenta de SU propia deuda.
+//  • Pagos nuevos: se etiquetan con deudaIds (las deudas que cubrieron al registrarse).
+//  • Pagos heredados (sin deudaIds): se EXCLUYEN solo si su tipo no coincide con ninguna
+//    deuda vigente del día (un pago de "Cuota" no puede tapar una "Multa" recién creada).
+const pagoAplicaADia = (p, deudasDia) => {
+  const ids   = new Set(deudasDia.map(d => String(d.id)));
+  const tipos = new Set(deudasDia.map(d => d.tipo).filter(Boolean));
+  if (Array.isArray(p.deudaIds) && p.deudaIds.length)
+    return p.deudaIds.some(id => ids.has(String(id)));
+  if (deudasDia.length === 0) return false;
+  const ptipos = String(p.tipo || "").split("+").map(s => s.trim()).filter(Boolean);
+  if (ptipos.length && !ptipos.some(t => tipos.has(t))) return false;
+  return true;
+};
+
 // Devuelve lo requerido, lo abonado y el saldo restante de un día concreto
 const estadoDia = (data, cid, f) => {
-  const req = montoRequerido(data, cid, f);
-  const pgs = data.pagos.filter(p => String(p.choferId)===String(cid) && p.fecha === f);
+  const req  = montoRequerido(data, cid, f);
+  const dDia = deudasDelDia(data, cid, f);
+  const pgs  = data.pagos.filter(p => String(p.choferId)===String(cid) && p.fecha === f && pagoAplicaADia(p, dDia));
   if (pgs.some(p => p.estado === "condonado")) return { req, pagado: req, restante: 0, condonado: true };
   const pagado = pgs.filter(p => p.estado === "pagado" || p.estado === "abono").reduce((s,p) => s + Number(p.monto||0), 0);
   return { req, pagado: round2(pagado), restante: round2(req - pagado), condonado: false };
@@ -156,8 +180,10 @@ const diasPendientes = (data, cid, hasta) => {
     if (req > 0) {
       const ed = estadoDia(data, cid, f);
       if (!ed.condonado && ed.restante > 0) {
-        const tipos = [...new Set(deudasDia.filter(d => calcMontoDia(d, f) > 0).map(d => d.tipo))];
-        res.push({ fecha:f, monto: ed.restante, montoTotal: req, abonado: ed.pagado, tipos });
+        const conCargo = deudasDia.filter(d => calcMontoDia(d, f) > 0);
+        const tipos = [...new Set(conCargo.map(d => d.tipo))];
+        const deudaIds = conCargo.map(d => d.id);
+        res.push({ fecha:f, monto: ed.restante, montoTotal: req, abonado: ed.pagado, tipos, deudaIds });
       }
     }
     cur.setDate(cur.getDate() + 1);
@@ -1512,14 +1538,18 @@ function Digitador({ data, setData }) {
     if (saldo > 0 && !hayAtras && futuros.length > 0)                              { setErr(`Queda un saldo a favor de ${saldo.toFixed(2)}. Imputa el saldo a una o más fechas futuras con saldo pendiente.`); return; }
     if (comprobanteDuplicado(data, comp.numero, comp.banco, fecha, comp.hora))     { setErr("Comprobante duplicado: mismo número, banco, fecha y hora ya registrados."); return; }
 
-    const nuevos = diasSel.map(f => ({
-      id: nuevoId(),
-      choferId: selC.id, fecha:f, fechaComp:fecha, hora:comp.hora,
-      monto: Number(selDias[f].monto), estado: selDias[f].estado,
-      tipo: (combinado.find(p => p.fecha===f)?.tipos || []).join(" + "),
-      comprobante: comp.numero, banco: comp.banco, cuentaDestino: comp.cuentaDestino,
-      esImputacion: f > fecha,
-    }));
+    const nuevos = diasSel.map(f => {
+      const reg = combinado.find(p => p.fecha===f);
+      return {
+        id: nuevoId(),
+        choferId: selC.id, fecha:f, fechaComp:fecha, hora:comp.hora,
+        monto: Number(selDias[f].monto), estado: selDias[f].estado,
+        tipo: (reg?.tipos || []).join(" + "),
+        deudaIds: reg?.deudaIds || [],   // etiqueta el pago con las deudas que cubre: evita el cruce de saldos entre deudas distintas del mismo día
+        comprobante: comp.numero, banco: comp.banco, cuentaDestino: comp.cuentaDestino,
+        esImputacion: f > fecha,
+      };
+    });
 
     setData(d => ({ ...d, pagos: [...d.pagos, ...nuevos] }));
     setModal(false);
