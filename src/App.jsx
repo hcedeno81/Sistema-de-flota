@@ -35,6 +35,7 @@ const INIT = {
   pagos:           [],
   pagosInv:        [],
   gastosInv:       [],
+  cierres:         [],
   usuarios: [
     { id:1, nombre:"Administrador", email:"admin@flota.com", password:"admin123", rol:"administrador", activo:true },
   ],
@@ -191,6 +192,50 @@ const diasPendientes = (data, cid, hasta) => {
   return res;
 };
 
+// Resumen de la tenencia de un chofer en un vehículo (para cierres e historial).
+// Recorre día por día SOLO las deudas activas de ese (chofer, vehículo) y calcula:
+//  • totalPagado:   suma de pagos atribuibles a esas deudas
+//  • saldoPendiente: cuánto quedó sin cubrir hasta la fecha de corte (se congela al cerrar)
+//  • ultimoDiaPagado: el último día que quedó completamente cubierto
+//  • requeridoTotal: cuánto debió pagar en total en el período
+// Es de solo lectura: no modifica nada. Sirve para la "foto" que se guarda en el cierre.
+const resumenChoferVehiculo = (data, cid, vid, hasta) => {
+  const deudas = data.deudas.filter(d => String(d.choferId)===String(cid) && String(d.vehiculoId)===String(vid) && d.activa);
+  const deudaIds = deudas.map(d => d.id);
+  const vacio = { deudaIds:[], primerDia:null, totalPagado:0, saldoPendiente:0, ultimoDiaPagado:null, requeridoTotal:0 };
+  if (!deudas.length) return vacio;
+  const idSet  = new Set(deudaIds.map(String));
+  const inicios= deudas.map(d=>d.fechaInicio).filter(Boolean).sort();
+  const fines  = deudas.map(d=>d.fechaFin).filter(Boolean).sort();
+  const primerDia = inicios[0] || null;
+  const finMax    = fines.length ? fines[fines.length-1] : hasta;
+  const limStr    = (hasta && finMax && hasta < finMax) ? hasta : finMax;
+  // ¿Este pago corresponde a alguna de estas deudas? (nuevo: por deudaIds; heredado: por rango de fecha)
+  const atribuible = (p) => {
+    if (Array.isArray(p.deudaIds) && p.deudaIds.length) return p.deudaIds.some(id => idSet.has(String(id)));
+    return deudas.some(d => d.fechaInicio<=p.fecha && d.fechaFin>=p.fecha);
+  };
+  const pagosAtrib = data.pagos.filter(p => String(p.choferId)===String(cid) && (p.estado==="pagado"||p.estado==="abono") && atribuible(p));
+  const totalPagado = round2(pagosAtrib.reduce((s,p)=>s+Number(p.monto||0),0));
+  const cur = parseF(primerDia), lim = parseF(limStr);
+  let saldo = 0, requeridoTotal = 0, ultimoDiaPagado = null, guard = 0;
+  if (cur && lim) {
+    while (cur <= lim && guard++ < 6000) {
+      const f = isoF(cur);
+      const req = deudas.reduce((s,d) => (d.fechaInicio<=f && d.fechaFin>=f ? s + calcMontoDia(d, f) : s), 0);
+      if (req > 0) {
+        requeridoTotal += req;
+        const pagadoDia = pagosAtrib.filter(p=>p.fecha===f).reduce((s,p)=>s+Number(p.monto||0),0);
+        const rest = round2(req - pagadoDia);
+        if (rest > 0) saldo += rest;
+        if (pagadoDia > 0 && rest <= 0) ultimoDiaPagado = f;
+      }
+      cur.setDate(cur.getDate()+1);
+    }
+  }
+  return { deudaIds, primerDia, totalPagado, saldoPendiente: round2(saldo), ultimoDiaPagado, requeridoTotal: round2(requeridoTotal) };
+};
+
 // ── Componentes UI base ──────────────────────────────────
 const Err  = ({ msg }) => msg ? <div style={{ background:"#fde8e8", color:"#c0392b", border:"1px solid #f5c6cb", borderRadius:8, padding:"8px 12px", fontSize:13, marginBottom:10 }}>{msg}</div> : null;
 const Info = ({ children }) => <div style={{ background:"#dbeafe", color:"#1e40af", border:"1px solid #bfdbfe", borderRadius:8, padding:"8px 12px", fontSize:13, marginBottom:10 }}>{children}</div>;
@@ -295,13 +340,17 @@ const Steps = ({ steps, cur }) => (
 
 function Vehiculos({ data, setData }) {
   const [modal,   setModal]   = useState(false);
-  const [rModal,  setRModal]  = useState(false);
   const [form,    setForm]    = useState({});
   const [editId,  setEditId]  = useState(null);
-  const [rVeh,    setRVeh]    = useState(null);
-  const [rChofer, setRChofer] = useState("");
   const [err,     setErr]     = useState("");
   const [aBorrar, setABorrar] = useState(null);
+  // Cierre / traspaso de chofer en un vehículo
+  const [cVeh,     setCVeh]     = useState(null);   // vehículo a cerrar
+  const [cChofer,  setCChofer]  = useState(null);   // chofer saliente
+  const [cResumen, setCResumen] = useState(null);   // foto del resumen al abrir
+  const [cFecha,   setCFecha]   = useState(hoy());
+  const [cBloquear,setCBloquear]= useState(false);
+  const [cNota,    setCNota]    = useState("");
 
   const campos = [
     ["placa","Placa","text"],["marca","Marca","text"],["modelo","Modelo","text"],["anio","Año","text"],
@@ -332,9 +381,39 @@ function Vehiculos({ data, setData }) {
     setABorrar(null);
   };
 
-  const reasignar = () => {
-    if (!rChofer) { alert("Selecciona un chofer."); return; }
-    setRModal(false);
+  const abrirCierre = (v, ch) => {
+    const r = resumenChoferVehiculo(data, ch.id, v.id, hoy());
+    setCVeh(v); setCChofer(ch); setCResumen(r);
+    setCFecha(hoy()); setCBloquear(false); setCNota(""); setModal(false);
+  };
+  const cerrarModalCierre = () => { setCVeh(null); setCChofer(null); setCResumen(null); };
+  const confirmarCierre = () => {
+    if (!cVeh || !cChofer || !cResumen) return;
+    const cierre = {
+      id: nuevoId(),
+      vehiculoId: cVeh.id, vehiculoPlaca: cVeh.placa,
+      choferId: cChofer.id, choferNombre: cChofer.nombres,
+      fechaCierre: cFecha,
+      primerDia: cResumen.primerDia,
+      totalPagado: cResumen.totalPagado,
+      saldoPendiente: cResumen.saldoPendiente,
+      ultimoDiaPagado: cResumen.ultimoDiaPagado,
+      requeridoTotal: cResumen.requeridoTotal,
+      deudaIds: cResumen.deudaIds,
+      accesoBloqueado: cBloquear,
+      nota: cNota.trim(),
+    };
+    const ids = new Set(cResumen.deudaIds.map(String));
+    setData(d => ({
+      ...d,
+      cierres: [...d.cierres, cierre],
+      // Congelar: las deudas de este chofer en este vehículo quedan inactivas y marcadas como cerradas.
+      // Solo dejan de generar cargos; NO se borran (reversible).
+      deudas: d.deudas.map(x => ids.has(String(x.id)) ? { ...x, activa:false, cerrada:true, cierreId:cierre.id } : x),
+      // Bloqueo opcional del acceso del chofer saliente (reversible desde Usuarios).
+      usuarios: cBloquear ? d.usuarios.map(u => String(u.choferId)===String(cChofer.id) ? { ...u, activo:false } : u) : d.usuarios,
+    }));
+    cerrarModalCierre();
   };
 
   return (
@@ -355,10 +434,12 @@ function Vehiculos({ data, setData }) {
                 <div style={{ fontSize:13, color:T2, marginTop:4 }}>Motor: {v.motor} | Chasis: {v.chasis} | Color: {v.color}</div>
                 {chofer  && <div style={{ fontSize:13, marginTop:4 }}>Chofer activo: <b>{chofer.nombres}</b> <Tag color="blue">Deuda activa</Tag></div>}
                 {!da     && <div style={{ fontSize:13, color:T2, marginTop:4 }}>Sin deuda activa asignada</div>}
+                {(data.cierres||[]).some(c => String(c.vehiculoId)===String(v.id)) &&
+                  <div style={{ fontSize:12, color:T2, marginTop:4 }}>Choferes anteriores cerrados: {(data.cierres||[]).filter(c => String(c.vehiculoId)===String(v.id)).length} <Tag color="gray">Ver en Historial vehículo</Tag></div>}
               </div>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
                 <Btn onClick={() => abrir(v)}>Editar</Btn>
-                {da && <Btn onClick={() => { setRVeh(v); setRChofer(""); setRModal(true); }}>Reasignar chofer</Btn>}
+                {da && chofer && <Btn onClick={() => abrirCierre(v, chofer)}>Cerrar / Traspasar</Btn>}
                 <Btn v="danger" onClick={() => eliminar(v)}>Eliminar</Btn>
               </div>
             </div>
@@ -377,11 +458,26 @@ function Vehiculos({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar</Btn></Acciones>
         </Modal>
       )}
-      {rModal && rVeh && (
-        <Modal title={`Reasignar chofer — ${rVeh.placa}`}>
-          <Info>Desactiva primero la deuda del chofer actual antes de reasignar.</Info>
-          <Sel label="Nuevo chofer" req value={rChofer} onChange={e => setRChofer(e.target.value)} opts={[{v:"",l:"Seleccionar..."}, ...data.choferes.map(c => ({v:c.id, l:c.nombres}))]} />
-          <Acciones><Btn onClick={() => setRModal(false)}>Cancelar</Btn><Btn v="primary" onClick={reasignar}>Reasignar</Btn></Acciones>
+      {cVeh && cChofer && cResumen && (
+        <Modal title={`Cerrar / traspasar — ${cVeh.placa}`}>
+          <Info>Vas a cerrar la tenencia de <b>{cChofer.nombres}</b> en el vehículo <b>{cVeh.placa}</b>. Sus deudas activas en este carro se <b>desactivan y se congelan</b> (dejan de salir en la agenda) y se guarda esta foto en el historial. Los pagos no se borran.</Info>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+            <div style={kpi}><div style={{ fontSize:12, color:T2 }}>Total pagado</div><div style={{ fontSize:18, fontWeight:500, color:"#15803d" }}>${cResumen.totalPagado.toFixed(2)}</div></div>
+            <div style={kpi}><div style={{ fontSize:12, color:T2 }}>Queda debiendo</div><div style={{ fontSize:18, fontWeight:500, color: cResumen.saldoPendiente>0?"#c0392b":"#15803d" }}>${cResumen.saldoPendiente.toFixed(2)}</div></div>
+          </div>
+          <div style={{ fontSize:13, color:T2, marginBottom:10 }}>
+            Período: {cResumen.primerDia || "—"} → {cFecha}{cResumen.ultimoDiaPagado ? ` · Último día cubierto: ${cResumen.ultimoDiaPagado}` : " · Sin días cubiertos aún"}<br />
+            Deudas que se cerrarán: {cResumen.deudaIds.length}
+          </div>
+          <Inp label="Fecha de cierre / traspaso" req type="date" value={cFecha} onChange={e => setCFecha(e.target.value)} />
+          <label style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:T, margin:"4px 0 12px", cursor:"pointer" }}>
+            <input type="checkbox" checked={cBloquear} onChange={e => setCBloquear(e.target.checked)} style={{ cursor:"pointer" }} />
+            Bloquear el acceso de {cChofer.nombres} (no podrá iniciar sesión). Reversible desde Usuarios.
+          </label>
+          <Inp label="Nota (opcional)" value={cNota} onChange={e => setCNota(e.target.value)} />
+          {cResumen.saldoPendiente > 0 && <Warn>Queda debiendo <b>${cResumen.saldoPendiente.toFixed(2)}</b>. Ese saldo se conserva congelado en el historial del vehículo.</Warn>}
+          <Info>Tras cerrar, para el chofer nuevo ve a <b>Deudas</b> y crea su deuda en este vehículo.</Info>
+          <Acciones><Btn onClick={cerrarModalCierre}>Cancelar</Btn><Btn v="primary" onClick={confirmarCierre}>Cerrar y guardar en historial</Btn></Acciones>
         </Modal>
       )}
       {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar el vehículo ${aBorrar.placa} — ${aBorrar.marca} ${aBorrar.modelo}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
@@ -992,6 +1088,14 @@ function Usuarios({ data, setData }) {
   const onPass   = e => setForm(f => ({...f, password:e.target.value}));
   const togglePass = () => setShowP(s => !s);
 
+  // Bloquear / reactivar el acceso de un usuario (no borra nada; solo cambia "activo").
+  const toggleActivo = (u) => {
+    if (u.activo && u.rol === "administrador" && data.usuarios.filter(x => x.rol === "administrador" && x.activo).length <= 1) {
+      alert("Debe quedar al menos un administrador activo."); return;
+    }
+    setData(d => ({ ...d, usuarios: d.usuarios.map(x => x.id === u.id ? { ...x, activo: !x.activo } : x) }));
+  };
+
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
@@ -1000,10 +1104,11 @@ function Usuarios({ data, setData }) {
       </div>
       {data.usuarios.length === 0 && <Vacío texto="Sin usuarios registrados." />}
       {data.usuarios.map(u => (
-        <div key={u.id} style={{ ...card2, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
-          <div><b style={{ fontWeight:500, color:T }}>{u.nombre}</b> <Tag color={rc[u.rol]||"gray"}>{u.rol}</Tag><div style={{ fontSize:13, color:T2 }}>{u.email}</div></div>
+        <div key={u.id} style={{ ...card2, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, opacity: u.activo === false ? 0.6 : 1 }}>
+          <div><b style={{ fontWeight:500, color:T }}>{u.nombre}</b> <Tag color={rc[u.rol]||"gray"}>{u.rol}</Tag> {u.activo === false && <Tag color="red">Bloqueado</Tag>}<div style={{ fontSize:13, color:T2 }}>{u.email}</div></div>
           <div style={{ display:"flex", gap:8 }}>
             <Btn onClick={() => abrir(u)}>Editar</Btn>
+            <Btn v={u.activo === false ? "success" : "default"} onClick={() => toggleActivo(u)}>{u.activo === false ? "Activar" : "Bloquear"}</Btn>
             <Btn v="danger" onClick={() => eliminar(u)}>Eliminar</Btn>
           </div>
         </div>
@@ -1407,11 +1512,110 @@ function EditarPagos({ data, setData }) {
   );
 }
 
+// ── Historial de vehículo (choferes que tuvo cada carro) ──
+function HistorialVehiculo({ data }) {
+  const [filtroVeh, setFiltroVeh] = useState("");
+  const cierres = (data.cierres || []);
+
+  const nombreChofer = id => data.choferes.find(c => c.id === Number(id))?.nombres || "—";
+
+  // Vehículos con algún cierre o con chofer activo (para no listar carros sin historia)
+  const vehiculos = data.vehiculos
+    .filter(v => !filtroVeh || String(v.id) === String(filtroVeh))
+    .map(v => {
+      const da     = vehiculoDeudaActiva(data, v.id);
+      const chofer = da ? data.choferes.find(c => c.id === Number(da.choferId)) : null;
+      const actual = chofer ? resumenChoferVehiculo(data, chofer.id, v.id, hoy()) : null;
+      const lista  = cierres.filter(c => String(c.vehiculoId) === String(v.id))
+                            .slice().sort((a,b) => String(b.fechaCierre).localeCompare(String(a.fechaCierre)));
+      return { v, chofer, actual, lista };
+    })
+    .filter(x => x.chofer || x.lista.length > 0);
+
+  const exportar = () => {
+    const filas = [];
+    cierres.slice().sort((a,b)=>String(a.fechaCierre).localeCompare(String(b.fechaCierre))).forEach(c => {
+      filas.push({
+        "Vehículo": c.vehiculoPlaca || (data.vehiculos.find(v=>v.id===Number(c.vehiculoId))?.placa || "—"),
+        "Chofer": c.choferNombre || nombreChofer(c.choferId),
+        "Desde": c.primerDia || "—", "Cierre": c.fechaCierre,
+        "Último día cubierto": c.ultimoDiaPagado || "—",
+        "Total pagado ($)": round2(c.totalPagado || 0),
+        "Saldo pendiente ($)": round2(c.saldoPendiente || 0),
+        "Acceso bloqueado": c.accesoBloqueado ? "Sí" : "No",
+        "Nota": c.nota || "",
+      });
+    });
+    descargarLibro([{ nombre:"Historial de vehículos", filas }], `historial_vehiculos_${hoy()}.xlsx`);
+  };
+
+  return (
+    <div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:12 }}>
+        <h3 style={{ margin:0, fontSize:16, fontWeight:500, color:T }}>Historial de vehículo</h3>
+        {cierres.length > 0 && <Btn v="primary" onClick={exportar}>Descargar historial (Excel)</Btn>}
+      </div>
+      <Info>Por cada carro: el chofer actual y los choferes anteriores ya cerrados, con cuánto pagó cada uno y hasta dónde llegó. Los cierres se generan desde <b>Vehículos → Cerrar / Traspasar</b>.</Info>
+      <Sel label="Filtrar por vehículo" value={filtroVeh} onChange={e => setFiltroVeh(e.target.value)} opts={[{v:"",l:"Todos los vehículos"}, ...data.vehiculos.map(v => ({v:v.id, l:`${v.placa} — ${v.marca}`}))]} />
+
+      {vehiculos.length === 0 && <Vacío texto="Aún no hay historial. Cierra un chofer desde Vehículos para empezar a registrar traspasos." />}
+
+      {vehiculos.map(({ v, chofer, actual, lista }) => (
+        <div key={v.id} style={{ ...card, marginBottom:12 }}>
+          <b style={{ fontSize:15, color:T }}>{v.placa}</b> <span style={{ fontSize:13, color:T2 }}>— {v.marca} {v.modelo}</span>
+
+          {chofer && actual ? (
+            <div style={{ marginTop:8, padding:"8px 12px", background:"#dbeafe", border:"1px solid #bfdbfe", borderRadius:8 }}>
+              <div style={{ fontSize:13, color:"#1e40af" }}><b>Chofer actual:</b> {chofer.nombres} <Tag color="blue">Activo</Tag></div>
+              <div style={{ fontSize:13, color:T, marginTop:4 }}>
+                Desde {actual.primerDia || "—"} · Pagado <b>${actual.totalPagado.toFixed(2)}</b>
+                {actual.saldoPendiente > 0 ? <> · Debe <b style={{ color:"#c0392b" }}>${actual.saldoPendiente.toFixed(2)}</b></> : <> · <span style={{ color:"#15803d" }}>al día</span></>}
+                {actual.ultimoDiaPagado && ` · Cubierto hasta ${actual.ultimoDiaPagado}`}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize:13, color:T2, marginTop:8 }}>Sin chofer activo en este momento.</div>
+          )}
+
+          {lista.length > 0 && (
+            <div style={{ marginTop:10 }}>
+              <div style={{ fontSize:12, fontWeight:600, color:T2, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Choferes anteriores</div>
+              <div style={{ overflowX:"auto", border:`1px solid ${BR}`, borderRadius:8 }}>
+                <table style={TBL}>
+                  <thead><tr>{["Chofer","Período","Cierre","Pagó","Quedó debiendo","Cubierto hasta","Acceso"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
+                  <tbody>{lista.map(c => (
+                    <tr key={c.id}>
+                      <td style={TD}>{c.choferNombre || nombreChofer(c.choferId)}</td>
+                      <td style={TD}>{c.primerDia || "—"} → {c.fechaCierre}</td>
+                      <td style={TD}>{c.fechaCierre}</td>
+                      <td style={TD}>${round2(c.totalPagado||0).toFixed(2)}</td>
+                      <td style={TD}>{c.saldoPendiente > 0 ? <b style={{ color:"#c0392b" }}>${round2(c.saldoPendiente).toFixed(2)}</b> : <span style={{ color:"#15803d" }}>$0.00</span>}</td>
+                      <td style={TD}>{c.ultimoDiaPagado || "—"}</td>
+                      <td style={TD}>{c.accesoBloqueado ? <Tag color="red">Bloqueado</Tag> : <Tag color="green">Permitido</Tag>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              {lista.some(c => c.nota) && (
+                <div style={{ marginTop:6 }}>
+                  {lista.filter(c => c.nota).map(c => (
+                    <div key={c.id} style={{ fontSize:12, color:T2 }}>Nota ({c.choferNombre || nombreChofer(c.choferId)}): {c.nota}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Panel administrador ───────────────────────────────────
 function PanelAdmin({ data, setData, onRestaurar }) {
   const [tab, setTab] = useState("alertas");
 
-  const panelVis = [{ id:"alertas",l:"Alertas" },{ id:"choferes",l:"Choferes" },{ id:"inversionistas",l:"Inversionistas" },{ id:"inversiones",l:"Inversiones" }];
+  const panelVis = [{ id:"alertas",l:"Alertas" },{ id:"choferes",l:"Choferes" },{ id:"inversionistas",l:"Inversionistas" },{ id:"inversiones",l:"Inversiones" },{ id:"historialVeh",l:"Historial vehículo" }];
   const panelCre = [{ id:"vehiculos",l:"Vehículos" },{ id:"bancos",l:"Bancos" },{ id:"cuentas",l:"Cuentas" },{ id:"deudas",l:"Deudas" },{ id:"usuarios",l:"Usuarios" },{ id:"editarPagos",l:"Editar pagos" }];
   const panelRep = [{ id:"reportes",l:"Reportes Excel" }];
 
@@ -1441,6 +1645,7 @@ function PanelAdmin({ data, setData, onRestaurar }) {
       {tab === "choferes"       && <Choferes       data={data} setData={setData} />}
       {tab === "inversionistas" && <Inversionistas data={data} setData={setData} />}
       {tab === "inversiones"    && <Inversiones    data={data} setData={setData} />}
+      {tab === "historialVeh"   && <HistorialVehiculo data={data} />}
       {tab === "vehiculos"      && <Vehiculos      data={data} setData={setData} />}
       {tab === "bancos"         && <Bancos         data={data} setData={setData} />}
       {tab === "cuentas"        && <Cuentas        data={data} setData={setData} />}
@@ -1897,22 +2102,29 @@ function VistaChofer({ data, choferId }) {
 
       {tab === "vencidos" && (
         <>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10 }}>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10, alignItems:"center" }}>
             <Tag color={vencidos.length>0?"red":"green"}>Vencidos a hoy: {vencidos.length}</Tag>
+            <Tag color={vencidos.length>0?"red":"green"}>Total vencido: ${round2(vencidos.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</Tag>
           </div>
           <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Días que ya debían estar pagados a la fecha de hoy (cuotas, préstamos y multas).</p>
           {vencidos.length === 0
             ? <p style={{ color:T2, fontSize:14 }}>No tienes pagos vencidos. Estás al día.</p>
             : <div style={{ overflowX:"auto", maxHeight:480, overflowY:"auto", background:W, border:`1px solid ${BR}`, borderRadius:8 }}>
                 <table style={TBL}>
-                  <thead><tr>{["Fecha","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
+                  <thead><tr>{["Fecha","Tipos","Monto","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
                   <tbody>{vencidos.map((p,i) => (
                     <tr key={i}>
                       <td style={TD}>{p.fecha}</td>
                       <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
-                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
+                      <td style={{ ...TD, fontWeight:500 }}>${Number(p.monto||0).toFixed(2)}</td>
+                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial: pagó ${Number(p.abonado).toFixed(2)} de ${Number(p.montoTotal||0).toFixed(2)}</span> : <span style={{ color:T2 }}>—</span>}</td>
                     </tr>
                   ))}</tbody>
+                  <tfoot><tr>
+                    <td style={{ ...TD, fontWeight:600 }} colSpan={2}>Total vencido</td>
+                    <td style={{ ...TD, fontWeight:600, color:"#c0392b" }}>${round2(vencidos.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</td>
+                    <td style={TD}></td>
+                  </tr></tfoot>
                 </table>
               </div>
           }
@@ -1921,22 +2133,29 @@ function VistaChofer({ data, choferId }) {
 
       {tab === "pendientes" && (
         <>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10 }}>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10, alignItems:"center" }}>
             <Tag color="amber">Pendientes por vencer: {porVencer.length}</Tag>
+            <Tag color="amber">Total por vencer: ${round2(porVencer.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</Tag>
           </div>
           <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Días futuros aún por vencer (cuotas, préstamos y multas).</p>
           {porVencer.length === 0
             ? <p style={{ color:T2, fontSize:14 }}>No hay pagos por vencer.</p>
             : <div style={{ overflowX:"auto", maxHeight:480, overflowY:"auto", background:W, border:`1px solid ${BR}`, borderRadius:8 }}>
                 <table style={TBL}>
-                  <thead><tr>{["Fecha","Tipos","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
+                  <thead><tr>{["Fecha","Tipos","Monto","Detalle"].map(h => <th key={h} style={{ ...TH, position:"sticky", top:0 }}>{h}</th>)}</tr></thead>
                   <tbody>{porVencer.map((p,i) => (
                     <tr key={i}>
                       <td style={TD}>{p.fecha}</td>
                       <td style={TD}><div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>{p.tipos.map(t => <Tag key={t} color={t==="Cuota"?"blue":t==="Multa"?"red":"amber"}>{t}</Tag>)}</div></td>
-                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial registrado</span> : <span style={{ color:T2 }}>—</span>}</td>
+                      <td style={{ ...TD, fontWeight:500 }}>${Number(p.monto||0).toFixed(2)}</td>
+                      <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial: pagó ${Number(p.abonado).toFixed(2)} de ${Number(p.montoTotal||0).toFixed(2)}</span> : <span style={{ color:T2 }}>—</span>}</td>
                     </tr>
                   ))}</tbody>
+                  <tfoot><tr>
+                    <td style={{ ...TD, fontWeight:600 }} colSpan={2}>Total por vencer</td>
+                    <td style={{ ...TD, fontWeight:600, color:"#856404" }}>${round2(porVencer.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</td>
+                    <td style={TD}></td>
+                  </tr></tfoot>
                 </table>
               </div>
           }
