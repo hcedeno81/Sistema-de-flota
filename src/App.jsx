@@ -2221,7 +2221,6 @@ function VistaChofer({ data, choferId }) {
         <>
           <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:10, alignItems:"center" }}>
             <Tag color="amber">Pendientes por vencer: {porVencer.length}</Tag>
-            <Tag color="amber">Total por vencer: ${round2(porVencer.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</Tag>
           </div>
           <p style={{ fontSize:12, color:T2, margin:"0 0 8px" }}>Días futuros aún por vencer (cuotas, préstamos y multas).</p>
           {porVencer.length === 0
@@ -2237,11 +2236,6 @@ function VistaChofer({ data, choferId }) {
                       <td style={TD}>{p.abonado > 0 ? <span style={{ fontSize:12, color:T2 }}>abono parcial: pagó ${Number(p.abonado).toFixed(2)} de ${Number(p.montoTotal||0).toFixed(2)}</span> : <span style={{ color:T2 }}>—</span>}</td>
                     </tr>
                   ))}</tbody>
-                  <tfoot><tr>
-                    <td style={{ ...TD, fontWeight:600 }} colSpan={2}>Total por vencer</td>
-                    <td style={{ ...TD, fontWeight:600, color:"#856404" }}>${round2(porVencer.reduce((s,p)=>s+Number(p.monto||0),0)).toFixed(2)}</td>
-                    <td style={TD}></td>
-                  </tr></tfoot>
                 </table>
               </div>
           }
