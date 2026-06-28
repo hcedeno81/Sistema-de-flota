@@ -740,6 +740,7 @@ function Deudas({ data, setData }) {
   const [err,       setErr]       = useState("");
   const [filtroCh,  setFiltroCh]  = useState("");
   const [expCh,     setExpCh]     = useState({});
+  const [aEliminar, setAEliminar] = useState(null); // deuda + pagos afectados, pendiente de borrado definitivo
 
   const abrir = (d = null) => { setForm(d || {activa:true}); setEditId(d?.id || null); setErr(""); setModal(true); };
 
@@ -781,6 +782,38 @@ function Deudas({ data, setData }) {
     setCondModal(false);
   };
 
+  // Borrado DEFINITIVO de una deuda creada por error (no es un cierre/archivo: la saca de la base).
+  // Calcula qué pagos quedan afectados para mostrarlos antes de confirmar:
+  //  • soloEsta:    pagos cuyo único vínculo es esta deuda → se borran con ella.
+  //  • compartidos: pagos que también cubrían otras deudas → se conservan, solo se les quita el vínculo.
+  //  • heredados:   pagos antiguos sin deudaIds dentro del rango → NO se tocan (se avisan para revisión manual).
+  const pedirEliminar = (d) => {
+    const incluye = p => Array.isArray(p.deudaIds) && p.deudaIds.some(id => String(id)===String(d.id));
+    const soloEsta    = data.pagos.filter(p => incluye(p) && p.deudaIds.every(id => String(id)===String(d.id)));
+    const compartidos = data.pagos.filter(p => incluye(p) && p.deudaIds.some(id => String(id)!==String(d.id)));
+    const ini = d.formaPago==="manual" ? (d.fechaManual||d.fechaInicio) : d.fechaInicio;
+    const fin = d.formaPago==="manual" ? (d.fechaManual||d.fechaFin)     : d.fechaFin;
+    const heredados = data.pagos.filter(p => String(p.choferId)===String(d.choferId) && (!Array.isArray(p.deudaIds)||!p.deudaIds.length) && p.fecha>=ini && p.fecha<=fin);
+    setAEliminar({ d, soloEsta, compartidos, heredados, montoSolo: round2(soloEsta.reduce((s,p)=>s+Number(p.monto||0),0)) });
+  };
+
+  const confirmarEliminarDeuda = () => {
+    const { d, soloEsta } = aEliminar;
+    const soloIds = new Set(soloEsta.map(p => String(p.id)));
+    setData(dd => ({
+      ...dd,
+      deudas: dd.deudas.filter(x => String(x.id) !== String(d.id)),
+      pagos: dd.pagos
+        .filter(p => !soloIds.has(String(p.id)))   // borra los pagos exclusivos de esta deuda
+        .map(p => (Array.isArray(p.deudaIds) && p.deudaIds.some(id => String(id)===String(d.id)))
+          ? { ...p, deudaIds: p.deudaIds.filter(id => String(id)!==String(d.id)) }   // desvincula los compartidos
+          : p),
+      // Por si esta deuda estuviera referenciada en algún cierre, se le quita el id (los montos del cierre ya están congelados).
+      cierres: (dd.cierres||[]).map(c => Array.isArray(c.deudaIds) ? { ...c, deudaIds: c.deudaIds.filter(id => String(id)!==String(d.id)) } : c),
+    }));
+    setAEliminar(null);
+  };
+
   const nombreChofer = id => data.choferes.find(c => c.id === Number(id))?.nombres || "—";
   const placaVeh     = id => data.vehiculos.find(v => v.id === Number(id))?.placa   || "—";
   const labelFP      = v  => FORMAS_PAGO.find(f => f.value === v)?.label            || v;
@@ -801,6 +834,7 @@ function Deudas({ data, setData }) {
           {d.activa && <Btn onClick={() => abrir(d)}>Editar</Btn>}
           <Btn v={d.activa?"danger":"primary"} onClick={() => toggle(d.id, d.activa)}>{d.activa?"Desactivar":"Activar"}</Btn>
           {!d.activa && !d.condonada && <Btn v="success" onClick={() => { setCondDeuda(d); setCondNota(""); setCondModal(true); }}>Condonar</Btn>}
+          <Btn v="danger" onClick={() => pedirEliminar(d)} style={{ background:"#fde8e8", borderColor:"#e0a0a0" }}>Eliminar</Btn>
         </div>
       </div>
     </div>
@@ -818,7 +852,7 @@ function Deudas({ data, setData }) {
         <h3 style={{ margin:0, fontSize:16, fontWeight:500, color:T }}>Deudas</h3>
         <Btn v="primary" onClick={() => abrir()}>+ Nueva</Btn>
       </div>
-      <Warn>Las deudas no se eliminan. Desactívalas para que no aparezcan en la agenda de cobros.</Warn>
+      <Warn><b>Desactivar</b> oculta la deuda de la agenda pero la conserva (úsalo cuando el chofer terminó de pagar o se va). <b>Eliminar</b> la borra de forma definitiva junto con sus pagos exclusivos: úsalo solo cuando la creaste por error.</Warn>
       <Sel label="Filtrar por chofer" value={filtroCh} onChange={e => setFiltroCh(e.target.value)} opts={[{v:"",l:"Todos los choferes"}, ...data.choferes.map(c => ({v:c.id, l:c.nombres}))]} />
       {data.deudas.length === 0 && <Vacío texto="Sin deudas registradas." />}
       {data.deudas.length > 0 && grupos.length === 0 && <Vacío texto="Este chofer no tiene deudas registradas." />}
@@ -866,6 +900,18 @@ function Deudas({ data, setData }) {
           <Info>Se condonarán todos los pagos pendientes de <b>{nombreChofer(condDeuda.choferId)}</b> en esta deuda.</Info>
           <Inp label="Motivo de condonación" req value={condNota} onChange={e => setCondNota(e.target.value)} />
           <Acciones><Btn onClick={() => setCondModal(false)}>Cancelar</Btn><Btn v="success" onClick={condonar}>Confirmar</Btn></Acciones>
+        </Modal>
+      )}
+      {aEliminar && (
+        <Modal title="Eliminar deuda definitivamente">
+          <Info>Vas a eliminar la deuda de <b>{nombreChofer(aEliminar.d.choferId)}</b> · {placaVeh(aEliminar.d.vehiculoId)} ({aEliminar.d.tipo} — {aEliminar.d.formaPago==="manual" ? `$${Number(aEliminar.d.montoManual||0).toFixed(2)} el ${aEliminar.d.fechaManual||aEliminar.d.fechaInicio}` : `${labelFP(aEliminar.d.formaPago)} · ${aEliminar.d.fechaInicio} → ${aEliminar.d.fechaFin}`}). <b>Esta acción es definitiva y no se puede deshacer.</b></Info>
+          <div style={{ fontSize:13, color:T, margin:"4px 0 10px", lineHeight:1.8 }}>
+            • Se borran <b>{aEliminar.soloEsta.length}</b> pago(s) que pertenecen <b>solo</b> a esta deuda (total ${aEliminar.montoSolo.toFixed(2)}).<br />
+            • Se conservan <b>{aEliminar.compartidos.length}</b> pago(s) que también cubrían otras deudas; solo se les quita el vínculo con esta.
+            {aEliminar.heredados.length > 0 && <><br />• Hay <b>{aEliminar.heredados.length}</b> pago(s) antiguo(s) en estas fechas sin vínculo de deuda. <b>No se tocan:</b> revísalos en <b>Editar pagos</b> por si alguno era de esta deuda (por ejemplo un abono suelto).</>}
+          </div>
+          <Warn>Antes de borrar, descarga una <b>copia de seguridad</b> desde Reportes por si necesitas volver atrás.</Warn>
+          <Acciones><Btn onClick={() => setAEliminar(null)}>Cancelar</Btn><Btn v="danger" onClick={confirmarEliminarDeuda}>Eliminar deuda y sus pagos</Btn></Acciones>
         </Modal>
       )}
     </div>
