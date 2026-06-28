@@ -500,6 +500,7 @@ function Choferes({ data, setData }) {
   const [editId, setEditId] = useState(null);
   const [err,    setErr]    = useState("");
   const [aBorrar, setABorrar] = useState(null);
+  const [verEstado, setVerEstado] = useState(null); // chofer cuyo estado se consulta (solo lectura)
 
   const campos = [
     ["nombres","Nombres completos","text"],["cedulaNum","Cédula","text"],
@@ -540,7 +541,8 @@ function Choferes({ data, setData }) {
               <div style={{ fontSize:13, color:T2 }}>Cédula: {c.cedulaNum}{c.celular && ` · Cel: ${c.celular}`}</div>
               {c.direccion && <div style={{ fontSize:13, color:T2 }}>Dirección: {c.direccion}</div>}
             </div>
-            <div style={{ display:"flex", gap:8 }}>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <Btn onClick={() => setVerEstado(c)}>Ver estado</Btn>
               <Btn onClick={() => abrir(c)}>Editar</Btn>
               <Btn v="danger" onClick={() => eliminar(c)}>Eliminar</Btn>
             </div>
@@ -560,6 +562,7 @@ function Choferes({ data, setData }) {
         </Modal>
       )}
       {aBorrar && <ConfirmBorrado mensaje={`Vas a eliminar al chofer ${aBorrar.nombres}.`} onCancelar={() => setABorrar(null)} onConfirmar={confirmarBorrado} />}
+      {verEstado && <VistaChoferModal data={data} choferId={verEstado.id} onClose={() => setVerEstado(null)} />}
     </div>
   );
 }
@@ -1750,6 +1753,7 @@ function Digitador({ data, setData }) {
   const [comp,   setComp]   = useState({ numero:"", hora:"", banco:"", cuentaDestino:"", totalComp:"" });
   const [selDias,setSelDias]= useState({});
   const enviandoRef = useRef(false); // evita doble registro por doble toque (común en móvil)
+  const [verEstado, setVerEstado] = useState(null); // chofer cuyo estado se está consultando (solo lectura)
 
   const pagoDe     = (cid, f) => data.pagos.find(p => String(p.choferId) === String(cid) && p.fecha === f);
   const pendientes = (cid, hasta) => diasPendientes(data, cid, hasta);
@@ -1922,6 +1926,7 @@ function Digitador({ data, setData }) {
               <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
                 {pend.length > 0 && <div style={{ textAlign:"right" }}><div style={{ fontSize:18, fontWeight:500, color:"#c0392b" }}>${total.toFixed(2)}</div><div style={{ fontSize:12, color:T2 }}>total pendiente</div></div>}
                 {pend.length > 0 && <Btn onClick={() => setExp(e => ({...e,[c.id]:!e[c.id]}))}>{exp[c.id]?"Ocultar":"Ver detalle"}</Btn>}
+                <Btn onClick={() => setVerEstado(c)}>Ver estado</Btn>
                 <Btn v="primary" onClick={() => abrirModal(c)}>Registrar pago</Btn>
               </div>
             </div>
@@ -2032,12 +2037,13 @@ function Digitador({ data, setData }) {
           <Acciones><Btn onClick={() => setModal(false)}>Cancelar</Btn><Btn v="primary" onClick={guardar}>Guardar registro</Btn></Acciones>
         </Modal>
       )}
+      {verEstado && <VistaChoferModal data={data} choferId={verEstado.id} onClose={() => setVerEstado(null)} />}
     </div>
   );
 }
 
 // ── Vista Chofer ─────────────────────────────────────────
-function VistaChofer({ data, choferId }) {
+function VistaChofer({ data, choferId, ajeno = false }) {
   const [tab, setTab] = useState("vencidos");
   const chofer = data.choferes.find(c => c.id === choferId);
 
@@ -2121,8 +2127,8 @@ function VistaChofer({ data, choferId }) {
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:16 }}>
-        <h2 style={{ margin:0, fontSize:18, fontWeight:500, color:T }}>Mi cuenta — {chofer.nombres}</h2>
-        <Btn v="primary" onClick={exportar}>Descargar mi estado (Excel)</Btn>
+        <h2 style={{ margin:0, fontSize:18, fontWeight:500, color:T }}>{ajeno ? "Estado de" : "Mi cuenta"} — {chofer.nombres}</h2>
+        <Btn v="primary" onClick={exportar}>{ajeno ? "Descargar estado (Excel)" : "Descargar mi estado (Excel)"}</Btn>
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:10, marginBottom:16 }}>
         {[["Pagos realizados",real.length,"#15803d"],["Cuotas vencidas (a hoy)",pendHoy.length,pendHoy.length===0?"#15803d":"#c0392b"],["Cuotas pendientes (total)",pend.length,pend.length===0?"#15803d":"#856404"],["Puntualidad",kpiPct+"%",kpiPct>=80?"#15803d":"#c0392b"]].map(([l,v,c]) => (
@@ -2241,6 +2247,21 @@ function VistaChofer({ data, choferId }) {
           }
         </>
       )}
+    </div>
+  );
+}
+
+// Ventana ancha que reutiliza la vista del chofer para que el administrador y el digitador
+// consulten el estado de cualquier chofer (solo lectura). Se abre desde la tarjeta del chofer.
+function VistaChoferModal({ data, choferId, onClose }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.4)", zIndex:100, display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"3vh 1rem", overflowY:"auto" }}>
+      <div style={{ ...card, width:"min(920px,98vw)", maxHeight:"94vh", overflowY:"auto", boxShadow:"0 4px 24px rgba(0,0,0,0.15)" }}>
+        <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:4 }}>
+          <Btn onClick={onClose}>✕ Cerrar</Btn>
+        </div>
+        <VistaChofer data={data} choferId={choferId} ajeno />
+      </div>
     </div>
   );
 }
