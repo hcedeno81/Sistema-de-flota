@@ -76,6 +76,9 @@ const capAnual= (m) => Number(m) * 0.20;
 const round2  = (n) => Math.round(n * 100) / 100;
 // Parseo seguro de fechas: devuelve null si la fecha es inválida o vacía
 const parseF  = (f) => { if (!f) return null; const d = new Date(f + "T12:00:00"); return isNaN(d.getTime()) ? null : d; };
+// ¿El año de la fecha es razonable? Atrapa errores de tipeo (ej. 2206 o 1900) que harían que el
+// recorrido día por día topara su límite interno y ocultara días pendientes.
+const anioRazonable = (f) => { const d = parseF(f); if (!d) return false; const y = d.getFullYear(); return y >= 2020 && y <= new Date().getFullYear() + 10; };
 // Formatea con los componentes LOCALES (no UTC) para que parseF→isoF sea idéntico en cualquier zona horaria
 const isoF    = (d) => {
   if (!d || isNaN(d.getTime())) return "—";
@@ -119,7 +122,13 @@ const descargarLibro = (sheets, filename) => {
 const choferTieneDeudaActiva = (data, cid) => data.deudas.some(d => String(d.choferId) === String(cid) && d.activa);
 const choferTienePagos       = (data, cid) => data.pagos.some(p => String(p.choferId) === String(cid));
 const vehiculoTieneDeudas    = (data, vid) => data.deudas.some(d => String(d.vehiculoId) === String(vid));
-const vehiculoDeudaActiva    = (data, vid) => data.deudas.find(d => String(d.vehiculoId) === String(vid) && d.activa);
+// Devuelve la deuda que define al "chofer activo" del vehículo. Si hay varias deudas activas
+// (p.ej. un préstamo viejo de otro chofer + la cuota del nuevo), prioriza la CUOTA, que es la
+// relación real de tenencia. Así no se muestra por error al chofer equivocado.
+const vehiculoDeudaActiva    = (data, vid) => {
+  const activas = data.deudas.filter(d => String(d.vehiculoId) === String(vid) && d.activa);
+  return activas.find(d => d.tipo === "Cuota") || activas[0];
+};
 const bancoEnUso             = (data, nombre) => data.pagos.some(p => p.banco === nombre);
 const cuentaEnUso            = (data, numero) => data.pagos.some(p => p.cuentaDestino === numero);
 const invEnUso               = (data, id) => data.gastosInv.some(g => g.invId === id) || data.pagosInv.some(p => p.invId === id);
@@ -741,6 +750,7 @@ function Deudas({ data, setData }) {
   const [filtroCh,  setFiltroCh]  = useState("");
   const [expCh,     setExpCh]     = useState({});
   const [aEliminar, setAEliminar] = useState(null); // deuda + pagos afectados, pendiente de borrado definitivo
+  const [dupConfirm,setDupConfirm]= useState(null); // { rec, solapadas } cuando se detecta posible deuda duplicada
 
   const abrir = (d = null) => { setForm(d || {activa:true}); setEditId(d?.id || null); setErr(""); setModal(true); };
 
@@ -751,6 +761,8 @@ function Deudas({ data, setData }) {
     }
     if (vacio(form, ["choferId","vehiculoId","tipo","formaPago","fechaInicio","fechaFin","descripcion"]).length) { setErr("Todos los campos son requeridos."); return; }
     if (form.fechaFin < form.fechaInicio) { setErr("La fecha fin no puede ser anterior a la fecha inicio."); return; }
+    // Validación de año razonable: evita que un error de tipeo (ej. 2206 o 1900) rompa el cálculo de días.
+    if (!anioRazonable(form.fechaInicio) || !anioRazonable(form.fechaFin)) { setErr("Revisa las fechas: el año parece incorrecto (usa una fecha entre 2020 y los próximos años)."); return; }
     if (form.tipo === "Cuota") {
       const conflicto = data.deudas.find(d => String(d.vehiculoId) === String(form.vehiculoId) && d.tipo === "Cuota" && d.activa && d.id !== editId);
       if (conflicto) {
@@ -765,8 +777,22 @@ function Deudas({ data, setData }) {
       rec.fechaInicio = rec.fechaManual;
       rec.fechaFin = rec.fechaManual;
     }
+    // Detección de duplicado: deuda activa del MISMO chofer y MISMO tipo cuyo rango de fechas se cruza.
+    // (La Cuota ya se bloquea arriba; esto atrapa Multas/Préstamos duplicados, la causa del saldo inflado.)
+    const solapadas = data.deudas.filter(d =>
+      String(d.id) !== String(rec.id) && d.activa &&
+      String(d.choferId) === String(rec.choferId) && d.tipo === rec.tipo &&
+      d.fechaInicio <= rec.fechaFin && d.fechaFin >= rec.fechaInicio
+    );
+    if (solapadas.length) { setDupConfirm({ rec, solapadas }); return; }
+    escribirDeuda(rec);
+  };
+
+  // Escritura real de la deuda (se llama directo o tras confirmar un posible duplicado).
+  const escribirDeuda = (rec) => {
     if (editId) setData(d => ({ ...d, deudas: d.deudas.map(x => x.id === editId ? rec : x) }));
     else        setData(d => ({ ...d, deudas: [...d.deudas, rec] }));
+    setDupConfirm(null);
     setModal(false);
   };
 
@@ -902,9 +928,20 @@ function Deudas({ data, setData }) {
           <Acciones><Btn onClick={() => setCondModal(false)}>Cancelar</Btn><Btn v="success" onClick={condonar}>Confirmar</Btn></Acciones>
         </Modal>
       )}
+      {dupConfirm && (
+        <Modal title="Posible deuda duplicada">
+          <Warn>Ya {dupConfirm.solapadas.length === 1 ? "existe una deuda activa" : `existen ${dupConfirm.solapadas.length} deudas activas`} del mismo tipo (<b>{dupConfirm.rec.tipo}</b>) para <b>{nombreChofer(dupConfirm.rec.choferId)}</b> en fechas que se cruzan con esta. Crear otra puede duplicar el cobro e inflar el saldo del día.</Warn>
+          <div style={{ fontSize:13, color:T, margin:"0 0 10px", lineHeight:1.8 }}>
+            {dupConfirm.solapadas.map(d => (
+              <div key={d.id}>• {d.formaPago === "manual" ? `$${Number(d.montoManual||0).toFixed(2)} el ${d.fechaManual||d.fechaInicio}` : `${labelFP(d.formaPago)} · ${d.fechaInicio} → ${d.fechaFin}`}{d.descripcion ? ` — ${d.descripcion}` : ""}</div>
+            ))}
+          </div>
+          <Info>Si fue un error, cancela y revisa. Si de verdad necesitas otra deuda aparte, puedes continuar.</Info>
+          <Acciones><Btn onClick={() => setDupConfirm(null)}>Cancelar</Btn><Btn v="primary" onClick={() => escribirDeuda(dupConfirm.rec)}>Crear de todos modos</Btn></Acciones>
+        </Modal>
+      )}
       {aEliminar && (
-        <Modal title="Eliminar deuda definitivamente">
-          <Info>Vas a eliminar la deuda de <b>{nombreChofer(aEliminar.d.choferId)}</b> · {placaVeh(aEliminar.d.vehiculoId)} ({aEliminar.d.tipo} — {aEliminar.d.formaPago==="manual" ? `$${Number(aEliminar.d.montoManual||0).toFixed(2)} el ${aEliminar.d.fechaManual||aEliminar.d.fechaInicio}` : `${labelFP(aEliminar.d.formaPago)} · ${aEliminar.d.fechaInicio} → ${aEliminar.d.fechaFin}`}). <b>Esta acción es definitiva y no se puede deshacer.</b></Info>
+        <Modal title="Eliminar deuda definitivamente">          <Info>Vas a eliminar la deuda de <b>{nombreChofer(aEliminar.d.choferId)}</b> · {placaVeh(aEliminar.d.vehiculoId)} ({aEliminar.d.tipo} — {aEliminar.d.formaPago==="manual" ? `$${Number(aEliminar.d.montoManual||0).toFixed(2)} el ${aEliminar.d.fechaManual||aEliminar.d.fechaInicio}` : `${labelFP(aEliminar.d.formaPago)} · ${aEliminar.d.fechaInicio} → ${aEliminar.d.fechaFin}`}). <b>Esta acción es definitiva y no se puede deshacer.</b></Info>
           <div style={{ fontSize:13, color:T, margin:"4px 0 10px", lineHeight:1.8 }}>
             • Se borran <b>{aEliminar.soloEsta.length}</b> pago(s) que pertenecen <b>solo</b> a esta deuda (total ${aEliminar.montoSolo.toFixed(2)}).<br />
             • Se conservan <b>{aEliminar.compartidos.length}</b> pago(s) que también cubrían otras deudas; solo se les quita el vínculo con esta.
@@ -1712,6 +1749,7 @@ function Digitador({ data, setData }) {
   const [exp,    setExp]    = useState({});
   const [comp,   setComp]   = useState({ numero:"", hora:"", banco:"", cuentaDestino:"", totalComp:"" });
   const [selDias,setSelDias]= useState({});
+  const enviandoRef = useRef(false); // evita doble registro por doble toque (común en móvil)
 
   const pagoDe     = (cid, f) => data.pagos.find(p => String(p.choferId) === String(cid) && p.fecha === f);
   const pendientes = (cid, hasta) => diasPendientes(data, cid, hasta);
@@ -1731,7 +1769,7 @@ function Digitador({ data, setData }) {
   const abrirModal = (c) => {
     setSelC(c);
     setComp({ numero:"", hora:"", banco:"", cuentaDestino:"", totalComp:"" });
-    setSelDias({}); setErr(""); setModal(true);
+    setSelDias({}); setErr(""); enviandoRef.current = false; setModal(true);
   };
 
   // Días del chofer seleccionado (memorizados): no se recalculan al escribir montos/comprobante.
@@ -1778,6 +1816,7 @@ function Digitador({ data, setData }) {
   };
 
   const guardar = () => {
+    if (enviandoRef.current) return;   // ya se está registrando: ignora toques repetidos
     setErr("");
     if (!totalComp || totalComp <= 0)                                              { setErr("Ingresa el monto total del comprobante."); return; }
     if (vacio(comp, ["numero","hora","banco","cuentaDestino"]).length)             { setErr("Completa todos los campos del comprobante."); return; }
@@ -1789,6 +1828,7 @@ function Digitador({ data, setData }) {
     if (saldo > 0 && !hayAtras && futuros.length > 0)                              { setErr(`Queda un saldo a favor de ${saldo.toFixed(2)}. Imputa el saldo a una o más fechas futuras con saldo pendiente.`); return; }
     if (comprobanteDuplicado(data, comp.numero, comp.banco, fecha, comp.hora))     { setErr("Comprobante duplicado: mismo número, banco, fecha y hora ya registrados."); return; }
 
+    enviandoRef.current = true;        // a partir de aquí, un segundo toque no vuelve a registrar
     const nuevos = diasSel.map(f => {
       const reg = combinado.find(p => p.fecha===f);
       return {
@@ -2505,6 +2545,15 @@ export default function App() {
     });
     return cancelar;
   }, []);
+
+  // Fix de seguridad: si al usuario con sesión abierta lo BLOQUEAN o lo ELIMINAN (desde este equipo
+  // u otro), su sesión se cierra sola en cuanto el cambio llega por tiempo real. La cuenta de
+  // emergencia no vive en la base, así que se exceptúa.
+  useEffect(() => {
+    if (!usuario || usuario.id === "admin_emergencia") return;
+    const u = (data.usuarios || []).find(x => String(x.id) === String(usuario.id));
+    if (!u || u.activo === false) setUsuario(null);
+  }, [data, usuario]);
 
   const estadoTxt = { listo:"", guardando:"Guardando…", guardado:"✓ Guardado", error:"⚠ Error al guardar" };
   const estadoCol = { listo:T2, guardando:"#856404", guardado:"#15803d", error:"#c0392b" };
