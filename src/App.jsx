@@ -1764,10 +1764,14 @@ function Digitador({ data, setData }) {
     const pend = diasPendientes(data, c.id, fecha);
     const res  = { Cuota:0, Multa:0, Préstamo:0 };
     pend.forEach(p => p.tipos.forEach(t => { res[t] = (res[t]||0) + 1; }));
-    const total = pend.reduce((s,p) => s + p.monto, 0);
+    // Dos cifras, relativas a la fecha de corte del selector "Hasta la fecha":
+    //  • saldoVencido: días con saldo pendiente ANTERIORES a la fecha de corte (atraso acumulado).
+    //  • cuotaDia:     lo que aún falta pagar EN la fecha de corte (ya descontados los abonos del día).
+    const saldoVencido = round2(pend.filter(p => p.fecha <  fecha).reduce((s,p) => s + p.monto, 0));
+    const cuotaDia     = round2(pend.filter(p => p.fecha === fecha).reduce((s,p) => s + p.monto, 0));
     const vehs  = [...new Set(data.deudas.filter(d => String(d.choferId)===String(c.id) && d.activa).map(d=>d.vehiculoId))]
       .map(vid => data.vehiculos.find(v=>v.id===Number(vid))?.placa).filter(Boolean);
-    return { chofer:c, pend, res, total, vehs };
+    return { chofer:c, pend, res, saldoVencido, cuotaDia, vehs };
   }), [data, fecha]);
 
   const abrirModal = (c) => {
@@ -1909,7 +1913,7 @@ function Digitador({ data, setData }) {
 
       {data.choferes.length === 0 && <Vacío texto="No hay choferes registrados." />}
 
-      {agenda.map(({ chofer:c, pend, res, total, vehs }) => {
+      {agenda.map(({ chofer:c, pend, res, saldoVencido, cuotaDia, vehs }) => {
         return (
           <div key={c.id} style={{ ...card, marginBottom:12 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8 }}>
@@ -1924,7 +1928,18 @@ function Digitador({ data, setData }) {
                 </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-                {pend.length > 0 && <div style={{ textAlign:"right" }}><div style={{ fontSize:18, fontWeight:500, color:"#c0392b" }}>${total.toFixed(2)}</div><div style={{ fontSize:12, color:T2 }}>total pendiente</div></div>}
+                {pend.length > 0 && (
+                  <div style={{ display:"flex", gap:8 }}>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:16, fontWeight:500, color: saldoVencido>0?"#c0392b":"#15803d" }}>${saldoVencido.toFixed(2)}</div>
+                      <div style={{ fontSize:11, color:T2 }}>saldo vencido</div>
+                    </div>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:16, fontWeight:500, color: cuotaDia>0?"#856404":T2 }}>${cuotaDia.toFixed(2)}</div>
+                      <div style={{ fontSize:11, color:T2 }}>cuota del día</div>
+                    </div>
+                  </div>
+                )}
                 {pend.length > 0 && <Btn onClick={() => setExp(e => ({...e,[c.id]:!e[c.id]}))}>{exp[c.id]?"Ocultar":"Ver detalle"}</Btn>}
                 <Btn onClick={() => setVerEstado(c)}>Ver estado</Btn>
                 <Btn v="primary" onClick={() => abrirModal(c)}>Registrar pago</Btn>
